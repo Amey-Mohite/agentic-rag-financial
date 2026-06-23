@@ -1,5 +1,7 @@
 """CLI: build the index from documents. Usage: python scripts/ingest.py --config config.yaml --path 'data/*.pdf'"""
 import argparse
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
 from agentic_rag.config import AppConfig
 from agentic_rag.ingest import ingest_paths
 

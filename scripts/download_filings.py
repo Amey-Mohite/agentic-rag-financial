@@ -67,11 +67,17 @@ def latest_filing_doc(cik: str, form: str) -> tuple[str, str]:
     raise ValueError(f"no {form} found for CIK {cik}")
 
 
-def download(ticker: str, form: str, out_dir: str) -> str:
+def download(ticker: str, form: str, out_dir: str, to_pdf: bool = False) -> str:
     """Download one filing's primary document into out_dir. RETURNS the saved path.
 
-    NOTE: EDGAR serves primary docs as HTML; we save the raw document. Convert to PDF if you prefer
-    (e.g. via a headless browser) — the ingest pipeline also accepts .txt/.html-as-text.
+    EDGAR serves primary docs as HTML. By default we save the .htm (the ingest pipeline extracts text
+    from HTML directly — cleaner than PDF, which mangles tables). With to_pdf=True we additionally
+    render it to PDF via pdfkit/wkhtmltopdf if that's installed.
+    PARAM ticker : e.g. 'AAPL'.
+    PARAM form   : e.g. '10-K'.
+    PARAM out_dir: output directory.
+    PARAM to_pdf : if True, also write a .pdf (requires `pip install pdfkit` + wkhtmltopdf binary).
+    RETURNS: path to the saved file (.pdf if to_pdf and conversion succeeded, else .htm).
     """
     cik = ticker_to_cik(ticker)
     accession, doc = latest_filing_doc(cik, form)
@@ -79,12 +85,26 @@ def download(ticker: str, form: str, out_dir: str) -> str:
     url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession}/{doc}"
     content = _get(url)
     os.makedirs(out_dir, exist_ok=True)
-    # primaryDocument can include a subpath or odd chars; keep only the base filename for the save.
-    safe_doc = os.path.basename(doc.replace("\\", "/"))
-    path = os.path.join(out_dir, f"{ticker}_{form}_{safe_doc}")
-    with open(path, "wb") as f:
+
+    # Always save the HTML first; normalize the extension to .htm regardless of EDGAR's naming.
+    base = os.path.splitext(os.path.basename(doc.replace("\\", "/")))[0]
+    htm_path = os.path.join(out_dir, f"{ticker}_{form}_{base}.htm")
+    with open(htm_path, "wb") as f:
         f.write(content)
-    return path
+
+    if not to_pdf:
+        return htm_path
+
+    # Optional HTML -> PDF. Needs pdfkit (pip) + the wkhtmltopdf binary on PATH.
+    pdf_path = os.path.join(out_dir, f"{ticker}_{form}_{base}.pdf")
+    try:
+        import pdfkit
+        pdfkit.from_file(htm_path, pdf_path)
+        return pdf_path
+    except Exception as e:
+        print(f"   [pdf-skip] could not render PDF ({e}); keeping {os.path.basename(htm_path)}. "
+              f"Install wkhtmltopdf + `pip install pdfkit` for PDF output. HTML works fine for ingest.")
+        return htm_path
 
 
 def main():
@@ -92,12 +112,14 @@ def main():
     ap.add_argument("--tickers", nargs="+", default=DEFAULT_TICKERS)
     ap.add_argument("--forms", nargs="+", default=DEFAULT_FORMS)
     ap.add_argument("--out", default="data")
+    ap.add_argument("--pdf", action="store_true",
+                    help="also render to PDF (requires wkhtmltopdf + pdfkit); default saves .htm")
     args = ap.parse_args()
 
     for ticker in args.tickers:
         for form in args.forms:
             try:
-                path = download(ticker, form, args.out)
+                path = download(ticker, form, args.out, to_pdf=args.pdf)
                 print(f"[ok] {ticker} {form} -> {path}")
             except Exception as e:
                 print(f"[skip] {ticker} {form}: {e}")

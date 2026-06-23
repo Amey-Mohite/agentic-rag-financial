@@ -10,7 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 import os
-
+from dotenv import load_dotenv
+load_dotenv()
 import yaml
 
 
@@ -33,8 +34,8 @@ class VectorStoreConfig:
     # pgvector
     dsn: Optional[str] = None
     # qdrant
-    url: Optional[str] = None
-    api_key: Optional[str] = None
+    url: Optional[str] = os.environ.get("QDRANT_URL")
+    api_key: Optional[str] = os.environ.get("QDRANT_API_KEY")
     collection: str = "filings"
     hnsw_m: int = 16
     hnsw_ef_construction: int = 64

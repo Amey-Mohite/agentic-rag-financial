@@ -128,12 +128,20 @@ Pick your backend in `config.yaml` (`vector_store.backend: qdrant | pgvector`).
 ```bash
 python scripts/download_filings.py        # downloads a few public SEC filings into ./data
 ```
-(See **“Which PDFs to download”** below if you'd rather grab them by hand.)
+EDGAR serves filings as **HTML**, so these save as `.htm` by default — the ingest pipeline extracts
+clean text from HTML directly (which is actually better than PDF, where tables get mangled). If you
+specifically want PDFs, add `--pdf` (requires `pip install pdfkit` + the `wkhtmltopdf` binary on your
+PATH):
+```bash
+python scripts/download_filings.py --tickers AAPL MSFT JPM --forms 10-K 10-Q          # .htm
+python scripts/download_filings.py --tickers AAPL MSFT JPM --forms 10-K 10-Q --pdf    # .pdf
+```
+(See **“Which documents to download”** below if you'd rather grab them by hand.)
 
 ### 4. Ingest
 ```bash
-python scripts/ingest.py --config config.yaml --path "data/*.pdf"
-# extracts → chunks → embeds → indexes; prints the chunk count
+python scripts/ingest.py --config config.yaml --path "data/*"
+# the "data/*" glob matches .htm AND .pdf; extracts → chunks → embeds → indexes; prints chunk count
 ```
 
 ### 5. Ask

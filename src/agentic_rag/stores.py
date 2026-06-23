@@ -96,6 +96,7 @@ class QdrantStore:
 
     def _client(self):
         from qdrant_client import QdrantClient
+        print(f"connecting to Qdrant at {self._cfg.url} with api_key={self._cfg.api_key}")
         return QdrantClient(url=self._cfg.url, api_key=self._cfg.api_key or None)
 
     def setup(self) -> None:
