@@ -10,6 +10,7 @@ dependencies = [
     "numpy>=1.26",
     "tiktoken>=0.7",
     "pypdf>=4.0",
+    "beautifulsoup4>=4.12",
     "openai>=1.40",
     "anthropic>=0.40",
     "sentence-transformers>=3.0",

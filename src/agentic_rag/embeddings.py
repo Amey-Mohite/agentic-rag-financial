@@ -8,6 +8,9 @@ from __future__ import annotations
 import numpy as np
 
 from .config import EmbeddingConfig
+from dotenv import load_dotenv
+load_dotenv()
+
 
 
 class Embedder:

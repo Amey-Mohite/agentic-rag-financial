@@ -1,5 +1,7 @@
 """CLI: ask a question. Usage: python scripts/ask.py --config config.yaml "What was FY revenue?" """
 import argparse
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
 from agentic_rag.agent import AgenticRAG
 
 def main():

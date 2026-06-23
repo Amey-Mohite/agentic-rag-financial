@@ -6,6 +6,8 @@ This is a thin harness: it runs each question through the agent, collects (quest
 retrieved contexts, ground_truth), then scores with Ragas. Wire your Langfuse keys via env to trace.
 """
 import argparse, json
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
 from agentic_rag.agent import AgenticRAG
 
 def main():
