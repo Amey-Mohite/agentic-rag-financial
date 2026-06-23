@@ -1,0 +1,24 @@
+# Brings up Qdrant + the API together for a one-command local demo.
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"   # REST + dashboard
+      - "6334:6334"   # gRPC (Python client uses this by default)
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY}
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file: .env
+    depends_on:
+      - qdrant
+    environment:
+      - RAG_CONFIG=config.yaml
+
+volumes:
+  qdrant_data:

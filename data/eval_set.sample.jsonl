@@ -1,0 +1,3 @@
+{"question": "What was total net revenue in the most recent fiscal year?", "ground_truth": "Fill in from your filing"}
+{"question": "How did net income change from the prior year to the most recent year?", "ground_truth": "Fill in"}
+{"question": "What are the main risk factors the company discloses?", "ground_truth": "Fill in"}

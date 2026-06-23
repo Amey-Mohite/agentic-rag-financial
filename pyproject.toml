@@ -1,0 +1,36 @@
+[project]
+name = "agentic-rag-financial"
+version = "0.1.0"
+description = "Agentic RAG over financial documents with hybrid retrieval, reranking, and citations."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "pyyaml>=6.0",
+    "numpy>=1.26",
+    "tiktoken>=0.7",
+    "pypdf>=4.0",
+    "openai>=1.40",
+    "anthropic>=0.40",
+    "sentence-transformers>=3.0",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.6",
+    # vector stores (install the one you use; both listed for convenience)
+    "psycopg[binary]>=3.2",
+    "qdrant-client>=1.12",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.5"]
+eval = ["ragas>=0.2", "langfuse>=3.0", "datasets>=2.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

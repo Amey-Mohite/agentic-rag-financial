@@ -1,0 +1,39 @@
+# ============================================================================
+# Agentic RAG configuration. Edit this, not the code.
+# Secrets use ${ENV_VAR} and are resolved from the environment at load time.
+# ============================================================================
+embedding:
+  model: text-embedding-3-large
+  dims: 3072
+
+generator:
+  model: claude-sonnet-4-6
+  max_tokens: 1024
+  temperature: 0.0
+
+vector_store:
+  backend: qdrant                 # qdrant | pgvector
+  # --- qdrant settings ---
+  url: http://localhost:6333
+  api_key: ${QDRANT_API_KEY}
+  collection: filings
+  # --- pgvector settings (used when backend: pgvector) ---
+  dsn: ${DATABASE_URL}            # postgresql://user:pass@host:5432/ragdb
+  hnsw_m: 16
+  hnsw_ef_construction: 64
+
+chunking:
+  strategy: recursive             # fixed | recursive | semantic
+  chunk_tokens: 500
+  overlap_tokens: 50
+
+retrieval:
+  top_k: 5
+  candidate_pool: 20
+  use_hybrid: true
+  use_reranker: true
+  reranker_model: BAAI/bge-reranker-v2-m3
+  rrf_k: 60
+
+agent:
+  max_steps: 6

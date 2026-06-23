@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+data/*.pdf
+data/*.htm
+data/*.html
+qdrant_storage/
+qdrant_data/
+*.sqlite
+.pytest_cache/
+.ruff_cache/
+env
