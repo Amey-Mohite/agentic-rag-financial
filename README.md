@@ -101,11 +101,7 @@ cp .env.example .env             # then fill in your keys
 
 **Option A — Qdrant via Docker (recommended for a quick demo):**
 ```bash
-docker run -d --name qdrant \
-  -p 6333:6333 -p 6334:6334 \
-  -v "$(pwd)/qdrant_storage:/qdrant/storage" \
-  -e QDRANT__SERVICE__API_KEY="$(openssl rand -hex 32)" \
-  qdrant/qdrant:latest
+docker run -d --name qdrant -p 6333:6333 -p 6334:6334  -v "$(pwd)/qdrant_storage:/qdrant/storage" -e QDRANT__SERVICE__API_KEY="$(openssl rand -hex 32)" qdrant/qdrant:latest
 ```
 - **Expose both ports.** 6333 is REST (dashboard at <http://localhost:6333/dashboard>), 6334 is
   gRPC — the Python client uses gRPC by default and will hang if only 6333 is open.
@@ -115,10 +111,7 @@ docker run -d --name qdrant \
 
 **Option B — Postgres + pgvector via Docker:**
 ```bash
-docker run -d --name pgvector \
-  -p 5432:5432 \
-  -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=ragdb \
-  pgvector/pgvector:pg16
+docker run -d --name pgvector -p 5432:5432 -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=ragdb pgvector/pgvector:pg16
 # then set DATABASE_URL=postgresql://postgres:postgres@localhost:5432/ragdb in .env
 ```
 

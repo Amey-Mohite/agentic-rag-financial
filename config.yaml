@@ -12,9 +12,9 @@ generator:
   temperature: 0.0
 
 vector_store:
-  backend: qdrant                 # qdrant | pgvector
+  backend: pgvector                 # qdrant | pgvector
   # --- qdrant settings ---
-  url: http://localhost:6333
+  url: ${QDRANT_URL}
   api_key: ${QDRANT_API_KEY}
   collection: filings
   # --- pgvector settings (used when backend: pgvector) ---
