@@ -1,29 +1,77 @@
+# ============================================================================
+# Full-stack manifest: Qdrant (vector DB) + the Agentic RAG app (API + web UI).
+# Apply with:  kubectl apply -f k8s/deployment.yaml
+# Secrets (API keys) are NOT in this file — create them once with:
+#   kubectl create secret generic agentic-rag-secrets \
+#     --from-literal=OPENAI_API_KEY=sk-... \
+#     --from-literal=ANTHROPIC_API_KEY=sk-ant-...
+# See DEPLOY_MINIKUBE.md for the full step-by-step.
+# ============================================================================
+
+# ---------- Qdrant: the vector database ----------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qdrant
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: qdrant } }
+  template:
+    metadata: { labels: { app: qdrant } }
+    spec:
+      containers:
+        - name: qdrant
+          image: qdrant/qdrant:latest
+          ports:
+            - { containerPort: 6333 }   # REST API (used by the Python client over HTTP)
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits:   { cpu: "1",    memory: "1Gi" }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: qdrant }            # DNS name "qdrant" → used as http://qdrant:6333
+spec:
+  selector: { app: qdrant }
+  ports: [{ port: 6333, targetPort: 6333 }]
+---
+# ---------- The Agentic RAG app (FastAPI API + the web UI) ----------
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: agentic-rag
 spec:
-  replicas: 2
+  # replicas: 1 because conversation memory + the indexed counter live in-process for this demo.
+  # (For multi-replica, back memory with Redis and share the vector store — Qdrant already is shared.)
+  replicas: 1
   selector: { matchLabels: { app: agentic-rag } }
   template:
     metadata: { labels: { app: agentic-rag } }
     spec:
       containers:
         - name: api
-          image: REGISTRY/agentic-rag:latest
+          image: agentic-rag:latest
+          imagePullPolicy: IfNotPresent          # use the image we loaded into Minikube, don't pull
           ports: [{ containerPort: 8000 }]
+          env:
+            - { name: RAG_CONFIG, value: "config.k8s.yaml" }   # qdrant-backed config
+            - { name: QDRANT_URL, value: "http://qdrant:6333" } # in-cluster Qdrant Service
           envFrom:
-            - secretRef: { name: agentic-rag-secrets }   # OPENAI/ANTHROPIC/QDRANT/DATABASE_URL
+            - secretRef: { name: agentic-rag-secrets }         # OPENAI_API_KEY, ANTHROPIC_API_KEY
           readinessProbe:
             httpGet: { path: /healthz, port: 8000 }
-            initialDelaySeconds: 10
+            initialDelaySeconds: 15                # give the reranker time to load on boot
+            periodSeconds: 10
           resources:
-            requests: { cpu: "500m", memory: "1Gi" }
-            limits:   { cpu: "1",    memory: "2Gi" }
+            # The cross-encoder reranker needs RAM; give it headroom on a laptop cluster.
+            requests: { cpu: "500m", memory: "2Gi" }
+            limits:   { cpu: "2",    memory: "4Gi" }
 ---
 apiVersion: v1
 kind: Service
 metadata: { name: agentic-rag }
 spec:
+  type: NodePort                        # NodePort so `minikube service` can open the UI in a browser
   selector: { app: agentic-rag }
-  ports: [{ port: 80, targetPort: 8000 }]
+  ports:
+    - { port: 80, targetPort: 8000 }

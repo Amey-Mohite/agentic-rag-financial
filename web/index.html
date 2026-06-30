@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<!--
+  index.html — the entire single-page frontend (HTML + CSS + JS, no build step).
+  Served by FastAPI at "/". It talks to the backend over fetch():
+      POST /session/configure  → build a pipeline from YOUR keys + config
+      GET  /session/{id}        → is this session configured? how much indexed?
+      POST /upload              → send documents to be vectorized (into your session)
+      POST /ask/stream          → ask a question, stream the cited answer back (SSE)
+
+  "Bring your own keys": you paste your OpenAI + Anthropic keys on the Settings tab, choose where
+  vectors are stored, tune the config, click Save & connect — then Upload and Ask.
+  Everything is commented so you can read exactly how the UI drives the backend.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Agentic RAG — Document Q&A</title>
+  <style>
+    :root {
+      --panel:#fff; --muted:#64748b; --line:#e2e8f0; --accent:#4f46e5; --accent-2:#6366f1;
+      --ok:#16a34a; --warn:#b45309; --user:#4f46e5; --bot:#f1f5f9; --radius:14px;
+      --shadow:0 10px 30px rgba(2,6,23,.12);
+    }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+      color:#0f172a; background:linear-gradient(160deg,#0f172a 0%,#1e293b 38%,#312e81 100%); min-height:100vh; }
+    header { display:flex; align-items:center; gap:14px; padding:14px 22px; color:#fff; flex-wrap:wrap; }
+    header .logo { font-weight:800; font-size:18px; display:flex; gap:10px; align-items:center; }
+    header .logo .dot { width:12px; height:12px; border-radius:50%; background:var(--accent-2); box-shadow:0 0 0 4px rgba(99,102,241,.25); }
+    nav { display:flex; gap:6px; }
+    nav button { background:transparent; color:#cbd5e1; border:0; padding:8px 14px; border-radius:10px; font-size:14px; font-weight:600; cursor:pointer; }
+    nav button:hover { color:#fff; background:rgba(255,255,255,.08); }
+    nav button.active { color:#fff; background:rgba(99,102,241,.35); }
+    header .spacer { flex:1; }
+    .badge { font-size:12px; color:#cbd5e1; background:rgba(255,255,255,.08); padding:6px 12px; border-radius:999px; }
+    .badge b { color:#fff; }
+    .badge.on b { color:#86efac; }
+    main { max-width:960px; margin:10px auto 50px; padding:0 18px; }
+    .card { background:var(--panel); border-radius:var(--radius); box-shadow:var(--shadow); }
+    section { display:none; } section.active { display:block; }
+    .pad { padding:24px; }
+    .pad h2 { margin:0 0 4px; } .pad p.lead { color:var(--muted); margin:0 0 18px; }
+
+    /* notice banner shown when not configured */
+    .notice { background:#fffbeb; border:1px solid #fde68a; color:#92400e; padding:12px 14px; border-radius:10px; font-size:14px; margin-bottom:14px; }
+
+    /* settings form */
+    .group { border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin-bottom:14px; }
+    .group h3 { margin:0 0 12px; font-size:14px; text-transform:uppercase; letter-spacing:.4px; color:#475569; }
+    .field { margin-bottom:14px; }
+    .field:last-child { margin-bottom:0; }
+    .field label { display:block; font-weight:600; font-size:13.5px; margin-bottom:4px; }
+    .field .why { font-size:12px; color:var(--muted); margin:4px 0 6px; line-height:1.45; }
+    .field input, .field select { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:10px; font-size:14px; outline:none; }
+    .field input:focus, .field select:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(79,70,229,.15); }
+    .row { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+    .row3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:14px; }
+    .check { display:flex; align-items:center; gap:9px; }
+    .check input { width:auto; }
+    .btn { background:var(--accent); color:#fff; border:0; padding:12px 22px; border-radius:12px; font-weight:700; font-size:14px; cursor:pointer; }
+    .btn:disabled { opacity:.5; cursor:not-allowed; }
+    .btn.ghost { background:#eef2ff; color:var(--accent); padding:9px 16px; }
+    .status-line { margin-top:12px; font-size:13.5px; }
+    .status-line.ok { color:var(--ok); font-weight:600; }
+    .status-line.err { color:#dc2626; font-weight:600; }
+    .spin { display:inline-block; width:14px; height:14px; border:2px solid #c7d2fe; border-top-color:var(--accent); border-radius:50%; animation:r .7s linear infinite; vertical-align:-2px; }
+    @keyframes r { to { transform:rotate(360deg);} }
+
+    /* chat */
+    .chat { display:flex; flex-direction:column; height:66vh; }
+    .chat-head { display:flex; align-items:center; justify-content:space-between; padding:14px 18px; border-bottom:1px solid var(--line); }
+    .chat-head h2 { margin:0; font-size:16px; } .chat-head .sub { font-size:12px; color:var(--muted); }
+    .messages { flex:1; overflow-y:auto; padding:18px; display:flex; flex-direction:column; gap:14px; }
+    .msg { max-width:86%; padding:12px 14px; border-radius:14px; line-height:1.5; white-space:pre-wrap; word-wrap:break-word; }
+    .msg.user { align-self:flex-end; background:var(--user); color:#fff; border-bottom-right-radius:4px; }
+    .msg.bot { align-self:flex-start; background:var(--bot); border-bottom-left-radius:4px; }
+    .statusmsg { align-self:flex-start; font-size:12.5px; color:var(--muted); font-style:italic; }
+    .citations { align-self:flex-start; max-width:86%; font-size:12.5px; color:#334155; }
+    .citations .c { display:inline-block; background:#eef2ff; border:1px solid #c7d2fe; color:#3730a3; padding:3px 9px; border-radius:999px; margin:3px 4px 0 0; }
+    .meta { align-self:flex-start; font-size:11.5px; color:#94a3b8; }
+    .composer { display:flex; gap:10px; padding:14px; border-top:1px solid var(--line); }
+    .composer input { flex:1; padding:13px 14px; border:1px solid var(--line); border-radius:12px; font-size:15px; outline:none; }
+    .empty { color:var(--muted); text-align:center; margin:auto; max-width:420px; }
+
+    /* upload */
+    .drop { border:2px dashed #c7d2fe; border-radius:var(--radius); padding:34px; text-align:center; color:var(--muted); cursor:pointer; background:#fafbff; }
+    .drop.drag { border-color:var(--accent); background:#eef2ff; color:var(--accent); }
+    .filelist { margin:16px 0; display:flex; flex-direction:column; gap:8px; }
+    .filerow { display:flex; align-items:center; justify-content:space-between; padding:10px 14px; border:1px solid var(--line); border-radius:10px; font-size:14px; }
+    .filerow .r { font-size:12.5px; color:var(--muted); } .filerow .r.ok { color:var(--ok); font-weight:600; }
+    .hint { font-size:12.5px; color:var(--muted); margin-top:8px; }
+
+    /* about */
+    .doc { padding:26px; line-height:1.65; } .doc h3 { margin:22px 0 8px; }
+    .doc code { background:#f1f5f9; padding:1px 6px; border-radius:6px; font-size:13px; }
+    .doc pre { background:#0f172a; color:#e2e8f0; padding:14px 16px; border-radius:10px; overflow-x:auto; font-size:12.5px; }
+    .pill { display:inline-block; background:#eef2ff; color:#3730a3; border:1px solid #c7d2fe; border-radius:999px; padding:3px 10px; font-size:12px; margin:3px 4px 0 0; }
+    @media (max-width:680px){ .row,.row3{grid-template-columns:1fr;} .msg{max-width:94%;} }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo"><span class="dot"></span> Agentic RAG</div>
+    <nav>
+      <button data-tab="settings" class="active">⚙️ Settings</button>
+      <button data-tab="upload">Upload</button>
+      <button data-tab="ask">Ask</button>
+      <button data-tab="about">How it's built</button>
+    </nav>
+    <div class="spacer"></div>
+    <div class="badge" id="connBadge">● not connected</div>
+    <div class="badge" id="stats">indexed: <b id="st-docs">0</b> docs · <b id="st-chunks">0</b> chunks</div>
+  </header>
+
+  <main>
+    <!-- ===================== SETTINGS ===================== -->
+    <section id="settings" class="active">
+      <div class="card pad">
+        <h2>Settings — bring your own keys</h2>
+        <p class="lead">Paste your API keys, choose where vectors are stored, tune the pipeline, then
+          <b>Save &amp; connect</b>. Keys stay in server memory for your session only and are never logged.</p>
+
+        <!-- API KEYS -->
+        <div class="group">
+          <h3>API keys (yours)</h3>
+          <div class="field">
+            <label>OpenAI API key</label>
+            <div class="why">Used to <b>embed</b> text into vectors (the “meaning” fingerprints used for search). Get one at platform.openai.com.</div>
+            <input id="openai_api_key" type="password" placeholder="sk-..." />
+          </div>
+          <div class="field">
+            <label>Anthropic API key</label>
+            <div class="why">Used by the <b>Claude</b> model that reads the retrieved text and writes the cited answer. Get one at console.anthropic.com.</div>
+            <input id="anthropic_api_key" type="password" placeholder="sk-ant-..." />
+          </div>
+        </div>
+
+        <!-- STORAGE -->
+        <div class="group">
+          <h3>Where to store the vector database</h3>
+          <div class="field">
+            <label>Vector store</label>
+            <div class="why"><b>In-memory</b> = zero setup, runs inside the server, lost on restart (great for a quick test). <b>Qdrant Cloud</b> = managed vector DB, persistent. <b>Supabase / Postgres (pgvector)</b> = persistent, uses a free Supabase Postgres database.</div>
+            <select id="vector_store">
+              <option value="memory">In-memory (no setup, ephemeral)</option>
+              <option value="qdrant">Qdrant Cloud (persistent)</option>
+              <option value="pgvector">Supabase / Postgres — pgvector (persistent)</option>
+            </select>
+          </div>
+          <div id="qdrantFields" style="display:none">
+            <div class="field">
+              <label>Qdrant URL</label>
+              <div class="why">Your cluster URL from cloud.qdrant.io, e.g. https://xxx.aws.cloud.qdrant.io:6333</div>
+              <input id="qdrant_url" type="text" placeholder="https://...cloud.qdrant.io:6333" />
+            </div>
+            <div class="field">
+              <label>Qdrant API key</label>
+              <div class="why">The API key for that cluster.</div>
+              <input id="qdrant_api_key" type="password" placeholder="qdrant key" />
+            </div>
+          </div>
+          <div id="pgFields" style="display:none">
+            <div class="field">
+              <label>Postgres connection string (Supabase)</label>
+              <div class="why">From Supabase → Project Settings → Database → Connection string. Use the <b>Session pooler</b> (or Direct) URI, e.g. <code>postgresql://postgres:PASSWORD@db.xxxx.supabase.co:5432/postgres</code>. pgvector is enabled automatically on connect. Note: learned-sparse (SPLADE) is Qdrant-only; with Postgres the app uses dense + keyword retrieval.</div>
+              <input id="pg_dsn" type="password" placeholder="postgresql://postgres:...@db.xxxx.supabase.co:5432/postgres" />
+            </div>
+          </div>
+        </div>
+
+        <!-- MODELS -->
+        <div class="group">
+          <h3>Models</h3>
+          <div class="row">
+            <div class="field">
+              <label>Embedding model</label>
+              <div class="why">Bigger = richer meaning vectors, slightly more cost. “large” (3072-dim) is the default; “small” (1536-dim) is cheaper/faster.</div>
+              <select id="embedding_model">
+                <option value="text-embedding-3-large">text-embedding-3-large (3072)</option>
+                <option value="text-embedding-3-small">text-embedding-3-small (1536)</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Generator (Claude) model</label>
+              <div class="why">The model that writes the answer. Sonnet is a strong default; pick a smaller one for lower cost.</div>
+              <select id="generator_model">
+                <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+                <option value="claude-haiku-4-5-20251001">claude-haiku-4-5 (cheaper/faster)</option>
+                <option value="claude-opus-4-8">claude-opus-4-8 (strongest)</option>
+              </select>
+            </div>
+          </div>
+          <div class="row3" style="margin-top:14px">
+            <div class="field">
+              <label>Max answer tokens</label>
+              <div class="why">Cap on answer length per model call. Higher = longer answers, more cost.</div>
+              <input id="max_tokens" type="number" value="1024" min="128" max="4096" />
+            </div>
+            <div class="field">
+              <label>Temperature</label>
+              <div class="why">0 = deterministic & factual (best for grounded Q&A). Higher = more varied wording.</div>
+              <input id="temperature" type="number" value="0" min="0" max="1" step="0.1" />
+            </div>
+            <div class="field">
+              <label class="check"><input id="use_prompt_caching" type="checkbox" checked /> Prompt caching</label>
+              <div class="why">Caches the system prompt + tools so multi-step questions cost less and run faster.</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- CHUNKING -->
+        <div class="group">
+          <h3>Chunking (how documents are split)</h3>
+          <div class="why" style="margin-bottom:10px">Chunking is the #1 silent failure in RAG: if an answer is split across two chunks, retrieval can miss it. These control the split.</div>
+          <div class="row3">
+            <div class="field">
+              <label>Strategy</label>
+              <div class="why">recursive = paragraph/sentence-aware (best default). fixed = blunt every-N-tokens. semantic = split on headings/topics.</div>
+              <select id="chunk_strategy">
+                <option value="recursive">recursive</option>
+                <option value="fixed">fixed</option>
+                <option value="semantic">semantic</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Chunk size (tokens)</label>
+              <div class="why">Target size of each chunk. Bigger = more context per chunk but less precise retrieval.</div>
+              <input id="chunk_tokens" type="number" value="500" min="100" max="2000" />
+            </div>
+            <div class="field">
+              <label>Overlap (tokens)</label>
+              <div class="why">Tokens shared between neighbouring chunks, so a fact on a boundary still appears whole.</div>
+              <input id="overlap_tokens" type="number" value="50" min="0" max="400" />
+            </div>
+          </div>
+        </div>
+
+        <!-- RETRIEVAL -->
+        <div class="group">
+          <h3>Retrieval (finding the right chunks)</h3>
+          <div class="row3">
+            <div class="field">
+              <label>Top-K</label>
+              <div class="why">How many chunks are finally given to the model. More = more context, more cost.</div>
+              <input id="top_k" type="number" value="5" min="1" max="20" />
+            </div>
+            <div class="field">
+              <label>Candidate pool</label>
+              <div class="why">How many chunks to pull before reranking/trimming. Bigger pool = better recall, slower.</div>
+              <input id="candidate_pool" type="number" value="20" min="5" max="100" />
+            </div>
+            <div class="field">
+              <label>RRF k</label>
+              <div class="why">Smoothing constant when fusing dense + sparse result lists. 60 is the standard value.</div>
+              <input id="rrf_k" type="number" value="60" min="1" max="200" />
+            </div>
+          </div>
+          <div class="row3" style="margin-top:14px">
+            <div class="field">
+              <label class="check"><input id="use_hybrid" type="checkbox" checked /> Hybrid search</label>
+              <div class="why">Combine meaning-based (dense) + word-based (sparse) search. Best accuracy.</div>
+            </div>
+            <div class="field">
+              <label class="check"><input id="use_reranker" type="checkbox" checked /> Cross-encoder rerank</label>
+              <div class="why">A precise second-pass scorer. Big accuracy boost, but loads a ~600MB model (needs ~2GB RAM).</div>
+            </div>
+            <div class="field">
+              <label>Sparse backend</label>
+              <div class="why">keyword = simple, no extra model. splade = smarter learned keywords (needs the [hybrid] extra installed).</div>
+              <select id="sparse_backend">
+                <option value="keyword">keyword</option>
+                <option value="splade">splade / BM42</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <!-- AGENT / MEMORY / INGEST -->
+        <div class="group">
+          <h3>Agent, memory &amp; ingestion</h3>
+          <div class="row3">
+            <div class="field">
+              <label>Max agent steps</label>
+              <div class="why">How many searches the agent may run for one question. Higher = better multi-part answers, more cost/time.</div>
+              <input id="max_steps" type="number" value="4" min="1" max="10" />
+            </div>
+            <div class="field">
+              <label>Memory turns</label>
+              <div class="why">How many recent Q&A turns are remembered, so follow-ups like “and the year before?” work.</div>
+              <input id="max_turns" type="number" value="6" min="0" max="20" />
+            </div>
+            <div class="field">
+              <label class="check"><input id="memory_enabled" type="checkbox" checked /> Conversation memory</label>
+              <div class="why">Turn follow-up context on/off.</div>
+            </div>
+          </div>
+          <div class="field" style="margin-top:14px">
+            <label class="check"><input id="extract_tables" type="checkbox" checked /> Table-aware PDF extraction</label>
+            <div class="why">Render PDF tables as Markdown so numbers keep their rows/columns (better numeric answers). Needs pdfplumber.</div>
+          </div>
+        </div>
+
+        <button class="btn" id="saveSettings">Save &amp; connect</button>
+        <div class="status-line" id="settingsStatus"></div>
+      </div>
+    </section>
+
+    <!-- ===================== UPLOAD ===================== -->
+    <section id="upload">
+      <div class="card pad">
+        <h2>Upload documents</h2>
+        <p class="lead">Files are extracted → chunked → embedded → stored in your vector index. Supported: PDF, HTML, TXT, MD.</p>
+        <div class="notice" id="uploadNotice" style="display:none">⚙️ Configure your keys on the <b>Settings</b> tab first.</div>
+        <div class="drop" id="drop"><p>📄 <b>Drag &amp; drop</b> files here, or <b>click to choose</b></p><p class="hint">Max 25 MB per file · multiple files OK</p></div>
+        <input type="file" id="file" multiple accept=".pdf,.htm,.html,.txt,.md" style="display:none" />
+        <div class="filelist" id="filelist"></div>
+        <button class="btn" id="ingest" disabled>Vectorize selected files</button>
+        <p class="hint" id="uploadHint"></p>
+      </div>
+    </section>
+
+    <!-- ===================== ASK ===================== -->
+    <section id="ask">
+      <div class="card chat">
+        <div class="chat-head">
+          <div><h2>Ask your documents</h2><div class="sub">Grounded, cited answers · streamed live · remembers the conversation</div></div>
+          <button class="btn ghost" id="newChat">New chat</button>
+        </div>
+        <div class="messages" id="messages">
+          <div class="empty" id="askEmpty">Configure on <b>Settings</b>, upload a document, then ask here.
+            Try “What was total revenue last fiscal year?” then a follow-up “and the year before?”.</div>
+        </div>
+        <div class="composer">
+          <input id="q" placeholder="Ask a question about your documents…" autocomplete="off" />
+          <button class="btn" id="send">Send</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== ABOUT ===================== -->
+    <section id="about">
+      <div class="card doc">
+        <h2>How this project is built</h2>
+        <p>An <b>Agentic RAG</b> system: it answers questions about your documents and cites the exact
+           source (document, page, score). The LLM is given the retriever <b>as a tool</b> and decides
+           what to search and how many times — so multi-part questions get full coverage.</p>
+        <h3>Flow</h3>
+        <pre>UPLOAD:  files → extract (table-aware) → chunk → embed (dense + sparse) → vector DB
+ASK:     question (+ memory) → [ LLM → search tool → retrieve ]* → cited answer (streamed)
+                                 │
+            retrieval: dense + sparse → RRF fusion → cross-encoder rerank → top-k</pre>
+        <h3>Where is the data stored?</h3>
+        <p>Vectors live in the <b>vector store</b> you choose on Settings: an <b>in-memory</b> Qdrant
+           (inside the server process — zero setup, but cleared on restart) or your own <b>Qdrant Cloud</b>
+           cluster (persistent). Your uploaded files are saved on the server only long enough to ingest
+           them; the searchable data is the vectors in the store.</p>
+        <h3>Tech stack</h3>
+        <div>
+          <span class="pill">Python</span><span class="pill">FastAPI</span><span class="pill">Anthropic Claude</span>
+          <span class="pill">OpenAI embeddings</span><span class="pill">Qdrant</span><span class="pill">SPLADE / BM42</span>
+          <span class="pill">cross-encoder rerank</span><span class="pill">Server-Sent Events</span>
+          <span class="pill">Docker</span><span class="pill">Kubernetes</span>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    // =====================================================================================
+    //  A per-browser session id identifies BOTH your pipeline and your conversation memory.
+    // =====================================================================================
+    function newSessionId(){ return 'web-' + Math.random().toString(36).slice(2) + Date.now().toString(36); }
+    let sessionId = (function(){ try { return localStorage.getItem('rag_session') || (function(){const s=newSessionId(); localStorage.setItem('rag_session',s); return s;})(); } catch(e){ return newSessionId(); } })();
+    let configured = false;   // becomes true after a successful /session/configure
+
+    // ---------- Tabs ----------
+    const tabs = document.querySelectorAll('nav button');
+    tabs.forEach(b => b.addEventListener('click', () => {
+      tabs.forEach(x => x.classList.remove('active')); b.classList.add('active');
+      document.querySelectorAll('section').forEach(s => s.classList.remove('active'));
+      document.getElementById(b.dataset.tab).classList.add('active');
+    }));
+
+    // ---------- Storage choice toggles the Qdrant fields ----------
+    const vectorStore = document.getElementById('vector_store');
+    vectorStore.addEventListener('change', () => {
+      // Show only the fields the chosen backend needs.
+      document.getElementById('qdrantFields').style.display = vectorStore.value === 'qdrant' ? 'block' : 'none';
+      document.getElementById('pgFields').style.display = vectorStore.value === 'pgvector' ? 'block' : 'none';
+    });
+
+    // ---------- Helpers to read the form into a settings object ----------
+    const val = id => document.getElementById(id).value;
+    const num = id => Number(document.getElementById(id).value);
+    const chk = id => document.getElementById(id).checked;
+    function collectSettings(){
+      return {
+        session_id: sessionId,
+        openai_api_key: val('openai_api_key').trim(),
+        anthropic_api_key: val('anthropic_api_key').trim(),
+        vector_store: val('vector_store'),
+        qdrant_url: val('qdrant_url').trim() || null,
+        qdrant_api_key: val('qdrant_api_key').trim() || null,
+        postgres_dsn: val('pg_dsn').trim() || null,
+        embedding_model: val('embedding_model'),
+        generator_model: val('generator_model'),
+        max_tokens: num('max_tokens'), temperature: num('temperature'),
+        use_prompt_caching: chk('use_prompt_caching'),
+        chunk_strategy: val('chunk_strategy'), chunk_tokens: num('chunk_tokens'), overlap_tokens: num('overlap_tokens'),
+        top_k: num('top_k'), candidate_pool: num('candidate_pool'),
+        use_hybrid: chk('use_hybrid'), use_reranker: chk('use_reranker'),
+        sparse_backend: val('sparse_backend'), rrf_k: num('rrf_k'),
+        max_steps: num('max_steps'), memory_enabled: chk('memory_enabled'), max_turns: num('max_turns'),
+        extract_tables: chk('extract_tables'),
+      };
+    }
+
+    // ---------- Save & connect (POST /session/configure) ----------
+    const saveBtn = document.getElementById('saveSettings');
+    const settingsStatus = document.getElementById('settingsStatus');
+    saveBtn.addEventListener('click', async () => {
+      const s = collectSettings();
+      if (!s.openai_api_key || !s.anthropic_api_key) { settingsStatus.className='status-line err'; settingsStatus.textContent='Please enter both API keys.'; return; }
+      if (s.vector_store === 'qdrant' && !s.qdrant_url) { settingsStatus.className='status-line err'; settingsStatus.textContent='Enter your Qdrant URL (or switch to In-memory).'; return; }
+      if (s.vector_store === 'pgvector' && !s.postgres_dsn) { settingsStatus.className='status-line err'; settingsStatus.textContent='Enter your Supabase/Postgres connection string (or switch to In-memory).'; return; }
+      saveBtn.disabled = true;
+      settingsStatus.className='status-line'; settingsStatus.innerHTML='<span class="spin"></span> Connecting & validating your keys…';
+      try {
+        const r = await fetch('/session/configure', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(s) });
+        if (!r.ok) { const e = await r.json().catch(()=>({})); throw new Error(e.detail || ('HTTP '+r.status)); }
+        configured = true;
+        settingsStatus.className='status-line ok'; settingsStatus.textContent='✓ Connected. Go to the Upload tab to add documents.';
+        setConnected(true);
+        setGates();
+      } catch(e) {
+        configured = false; setConnected(false);
+        settingsStatus.className='status-line err'; settingsStatus.textContent='Could not connect: ' + e.message;
+      } finally { saveBtn.disabled = false; }
+    });
+
+    function setConnected(on){
+      const b = document.getElementById('connBadge');
+      b.className = 'badge' + (on ? ' on' : ''); b.innerHTML = on ? '● <b>connected</b>' : '● not connected';
+    }
+    // Enable/disable Upload + Ask depending on whether we're configured.
+    function setGates(){
+      document.getElementById('uploadNotice').style.display = configured ? 'none' : 'block';
+      document.getElementById('ingest').disabled = !configured || chosen.length === 0;
+      document.getElementById('send').disabled = !configured;
+      document.getElementById('q').disabled = !configured;
+    }
+
+    // ---------- Stats ----------
+    async function refreshStats(){
+      try { const r = await fetch('/session/' + sessionId); const s = await r.json();
+        document.getElementById('st-docs').textContent = s.documents ?? 0;
+        document.getElementById('st-chunks').textContent = s.chunks ?? 0;
+        if (s.configured) { configured = true; setConnected(true); }
+        setGates();
+      } catch(e){}
+    }
+
+    // =====================================================================================
+    //  UPLOAD
+    // =====================================================================================
+    const drop = document.getElementById('drop'), fileInput = document.getElementById('file');
+    const fileList = document.getElementById('filelist'), ingestBtn = document.getElementById('ingest');
+    const uploadHint = document.getElementById('uploadHint');
+    let chosen = [];
+    drop.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => addFiles(fileInput.files));
+    ['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('drag'); }));
+    ['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('drag'); }));
+    drop.addEventListener('drop', e => addFiles(e.dataTransfer.files));
+    function addFiles(fs){ for (const f of fs) chosen.push(f); renderFiles(); setGates(); }
+    function renderFiles(){ fileList.innerHTML=''; chosen.forEach((f,i)=>{ const row=document.createElement('div'); row.className='filerow';
+      row.innerHTML = `<span>📄 ${f.name} <span class="r">(${(f.size/1024).toFixed(0)} KB)</span></span><span class="r" id="r-${i}">queued</span>`; fileList.appendChild(row); }); }
+
+    ingestBtn.addEventListener('click', async () => {
+      if (!configured) { uploadHint.textContent='Configure on the Settings tab first.'; return; }
+      if (!chosen.length) return;
+      ingestBtn.disabled = true;
+      uploadHint.innerHTML = '<span class="spin"></span> Vectorizing… (first upload may take a minute while models warm up)';
+      const form = new FormData();
+      form.append('session_id', sessionId);                 // tells the backend which pipeline to use
+      chosen.forEach(f => form.append('files', f));
+      try {
+        const r = await fetch('/upload', { method:'POST', body: form });
+        if (!r.ok) { const e = await r.json().catch(()=>({})); throw new Error(e.detail || ('HTTP '+r.status)); }
+        const data = await r.json();
+        data.results.forEach((res,i)=>{ const el=document.getElementById('r-'+i); if(el){ el.textContent=`✓ ${res.chunks} chunks`; el.className='r ok'; } });
+        uploadHint.textContent = `Done — indexed ${data.results.length} file(s). Switch to Ask.`;
+        refreshStats(); chosen = [];
+      } catch(e) { uploadHint.innerHTML = `<span style="color:#dc2626">Upload failed: ${e.message}</span>`; ingestBtn.disabled = false; }
+    });
+
+    // =====================================================================================
+    //  ASK (streaming)
+    // =====================================================================================
+    const messages = document.getElementById('messages'), qInput = document.getElementById('q'), sendBtn = document.getElementById('send');
+    document.getElementById('newChat').addEventListener('click', () => { sessionId = sessionId; messages.innerHTML = '<div class="empty">New conversation. Ask a question.</div>'; });
+    sendBtn.addEventListener('click', ask);
+    qInput.addEventListener('keydown', e => { if (e.key === 'Enter') ask(); });
+
+    function addBubble(cls, text){ const e=messages.querySelector('.empty'); if(e) e.remove();
+      const el=document.createElement('div'); el.className='msg '+cls; el.textContent=text||''; messages.appendChild(el); messages.scrollTop=messages.scrollHeight; return el; }
+
+    async function ask(){
+      if (!configured) { addBubble('statusmsg','⚙️ Configure your keys on the Settings tab first.'); return; }
+      const question = qInput.value.trim(); if (!question) return;
+      qInput.value=''; sendBtn.disabled=true; qInput.disabled=true;
+      addBubble('user', question);
+      const status = addBubble('statusmsg', '🔎 thinking…');
+      let botEl=null, answer='';
+      try {
+        const resp = await fetch('/ask/stream', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ question, session_id: sessionId }) });
+        if (!resp.ok || !resp.body) { const e = await resp.json().catch(()=>({})); throw new Error(e.detail || ('HTTP '+resp.status)); }
+        const reader = resp.body.getReader(), decoder = new TextDecoder(); let buffer='';
+        while (true) {
+          const { value, done } = await reader.read(); if (done) break;
+          buffer += decoder.decode(value, { stream:true });
+          const frames = buffer.split('\n\n'); buffer = frames.pop();
+          for (const frame of frames) {
+            const line = frame.split('\n').find(l => l.startsWith('data: ')); if (!line) continue;
+            const ev = JSON.parse(line.slice(6));
+            if (ev.type === 'step') status.textContent = `🔎 searching: “${ev.query}”`;
+            else if (ev.type === 'token') { if(!botEl){ status.remove(); botEl = addBubble('bot',''); } answer += ev.text; botEl.textContent = answer; messages.scrollTop = messages.scrollHeight; }
+            else if (ev.type === 'final') { if(!botEl){ status.remove(); botEl = addBubble('bot', ev.answer); } renderCitations(ev.citations); renderMeta(ev.steps, ev.usage); }
+          }
+        }
+      } catch(e) { status.textContent = '⚠️ Error: ' + e.message; }
+      finally { sendBtn.disabled=false; qInput.disabled=false; qInput.focus(); }
+    }
+
+    function renderCitations(cs){ if(!cs||!cs.length) return; const el=document.createElement('div'); el.className='citations';
+      el.innerHTML = '<b>Sources:</b> ' + cs.map(c => `<span class="c" title="score ${c.score}">${c.source}${c.page?' · p'+c.page:''}</span>`).join(''); messages.appendChild(el); messages.scrollTop=messages.scrollHeight; }
+    function renderMeta(steps, usage){ const el=document.createElement('div'); el.className='meta';
+      const tok = usage && usage.input_tokens!=null ? `${usage.input_tokens} in / ${usage.output_tokens} out tokens` : '';
+      el.textContent = `${steps} search step(s) · ${tok}`; messages.appendChild(el); messages.scrollTop=messages.scrollHeight; }
+
+    // ---------- init ----------
+    setConnected(false); setGates(); refreshStats();
+  </script>
+</body>
+</html>

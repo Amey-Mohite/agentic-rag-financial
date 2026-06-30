@@ -1,4 +1,5 @@
-# Brings up Qdrant + the API together for a one-command local demo.
+# Brings up Qdrant + the API (with web UI) together for a one-command local demo.
+#   docker compose up --build      then open  http://localhost:8000
 services:
   qdrant:
     image: qdrant/qdrant:latest
@@ -18,7 +19,9 @@ services:
     depends_on:
       - qdrant
     environment:
-      - RAG_CONFIG=config.yaml
+      # Use the Qdrant-backed config and point it at the qdrant service (matches the k8s setup).
+      - RAG_CONFIG=config.k8s.yaml
+      - QDRANT_URL=http://qdrant:6333
 
 volumes:
   qdrant_data:

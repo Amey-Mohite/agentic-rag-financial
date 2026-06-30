@@ -31,6 +31,10 @@ from .stores import VectorStore, Hit
 # The query embedder.
 from .embeddings import Embedder
 
+# Module-level cache of loaded cross-encoder rerankers, shared across all Retriever instances
+# (keyed by model name) so a multi-session server loads each reranker only once.
+_RERANKERS: dict = {}
+
 
 def reciprocal_rank_fusion(ranked_lists: list[list[Hit]], rrf_k: int = 60) -> list[Hit]:
     """Fuse several ranked lists into one, using Reciprocal Rank Fusion (RRF).
@@ -83,22 +87,40 @@ class Retriever:
     reranker is loaded LAZILY (only on first use) because it's a heavy model download.
     """
 
-    def __init__(self, store: VectorStore, embedder: Embedder, cfg: RetrievalConfig):
-        """Wire in the collaborators; defer loading the reranker until it's actually needed."""
-        self._store = store        # where vectors live (Qdrant/pgvector)
-        self._embedder = embedder  # turns the query into a vector
-        self._cfg = cfg            # retrieval knobs
-        self._reranker = None      # lazy: filled in by _get_reranker() on first search
+    def __init__(self, store: VectorStore, embedder: Embedder, cfg: RetrievalConfig,
+                 sparse_embedder=None):
+        """Wire in the collaborators; defer loading the reranker until it's actually needed.
+
+        Parameters
+        ----------
+        store, embedder, cfg : as before.
+        sparse_embedder : SparseEmbedder | None
+            When provided AND the store supports native hybrid, search() fuses dense + learned
+            sparse vectors inside the store (true hybrid). Otherwise we fall back to the app-side
+            dense + keyword + RRF path.
+        """
+        self._store = store                  # where vectors live (Qdrant/pgvector)
+        self._embedder = embedder            # turns the query into a DENSE vector
+        self._sparse_embedder = sparse_embedder  # turns the query into a SPARSE vector (optional)
+        self._cfg = cfg                      # retrieval knobs
+        self._reranker = None                # lazy: filled in by _get_reranker() on first search
+        # Use native hybrid only if BOTH the store supports it and we have a sparse embedder.
+        self._native_hybrid = bool(getattr(store, "supports_native_hybrid", False)
+                                    and sparse_embedder is not None)
 
     def _get_reranker(self):
         """Lazily construct and cache the cross-encoder reranker.
 
-        We only download/load the model the first time reranking is requested, then reuse the
-        cached instance on every subsequent call.
+        Cached in a MODULE-LEVEL dict keyed by model name so every Retriever / web session SHARES
+        one loaded cross-encoder (it's the same model regardless of API keys), keeping memory
+        bounded on a multi-session server.
         """
         if self._reranker is None:
-            from sentence_transformers import CrossEncoder  # local import: heavy dependency
-            self._reranker = CrossEncoder(self._cfg.reranker_model)
+            name = self._cfg.reranker_model
+            if name not in _RERANKERS:
+                from sentence_transformers import CrossEncoder  # local import: heavy dependency
+                _RERANKERS[name] = CrossEncoder(name)
+            self._reranker = _RERANKERS[name]
         return self._reranker
 
     def search(self, query: str) -> list[Hit]:
@@ -116,14 +138,21 @@ class Retriever:
         """
         # 1. Embed the query into the same space as the stored chunk vectors.
         qvec = self._embedder.embed_query(query)
-        # 2. Dense search for a CANDIDATE POOL (wider than top_k so rerank has options).
-        dense = self._store.dense_search(qvec, self._cfg.candidate_pool)
-        # 3. If hybrid is on, also run sparse search and fuse the two lists with RRF.
-        if self._cfg.use_hybrid:
+        # 2. Build the candidate POOL (wider than top_k so the reranker has options).
+        if self._cfg.use_hybrid and self._native_hybrid:
+            # BEST PATH — true hybrid fused inside the store (dense + learned SPLADE/BM42 sparse,
+            # one round-trip, server-side RRF). See QdrantStore.hybrid_search.
+            sparse_qvec = self._sparse_embedder.embed_query(query)
+            pool = self._store.hybrid_search(qvec, sparse_qvec, self._cfg.candidate_pool)
+        elif self._cfg.use_hybrid:
+            # FALLBACK PATH — dense + keyword sparse fused app-side with RRF (no sparse model, or
+            # a backend without native hybrid such as pgvector).
+            dense = self._store.dense_search(qvec, self._cfg.candidate_pool)
             sparse = self._store.sparse_search(query, self._cfg.candidate_pool)
             pool = reciprocal_rank_fusion([dense, sparse], self._cfg.rrf_k)
         else:
-            pool = dense  # dense-only retrieval
+            # Dense-only retrieval.
+            pool = self._store.dense_search(qvec, self._cfg.candidate_pool)
         # 4. Trim the fused pool back to candidate_pool size before the (costly) rerank.
         pool = pool[: self._cfg.candidate_pool]
         if not pool:
