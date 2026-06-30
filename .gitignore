@@ -11,3 +11,4 @@ qdrant_data/
 .pytest_cache/
 .ruff_cache/
 env
+UPWORK_PORTFOLIO.md
