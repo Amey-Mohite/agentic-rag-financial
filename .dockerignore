@@ -1,0 +1,19 @@
+# Keep secrets and local junk OUT of the Docker build context (and therefore out of any image).
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.git/
+.gitignore
+qdrant_storage/
+qdrant_data/
+data/*.pdf
+data/*.htm
+data/*.html
+*.ipynb_checkpoints
+.DS_Store

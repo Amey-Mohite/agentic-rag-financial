@@ -10,6 +10,7 @@ generator:
   model: claude-sonnet-4-6
   max_tokens: 1024
   temperature: 0.0
+  use_prompt_caching: true        # cache system prompt + tool defs to cut multi-step agent cost
 
 vector_store:
   backend: pgvector                 # qdrant | pgvector
@@ -34,6 +35,16 @@ retrieval:
   use_reranker: true
   reranker_model: BAAI/bge-reranker-v2-m3
   rrf_k: 60
+  sparse_backend: splade          # splade | keyword  (splade = true hybrid via fastembed, Qdrant)
+  sparse_model: Qdrant/bm42-all-minilm-l6-v2-attentions
 
 agent:
   max_steps: 6
+
+memory:
+  enabled: true                   # per-session conversation history for follow-up questions
+  max_turns: 6                    # how many recent (user,assistant) exchanges to retain
+  backend: memory                 # memory (in-process) | (swap for redis in production)
+
+ingestion:
+  extract_tables: true            # PDFs: render tables as Markdown so numbers stay structured

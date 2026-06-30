@@ -66,9 +66,15 @@ class VectorStore(Protocol):
     `Protocol` means: any class that HAS these four methods (with these signatures) counts
     as a VectorStore — no explicit subclassing required. The `...` bodies are just stubs;
     the real implementations live in the concrete classes below.
+    `supports_native_hybrid` advertises whether the store can fuse dense + learned-sparse vectors
+    server-side (Qdrant with SPLADE/BM42 enabled). The Retriever reads it to choose between a
+    single native hybrid call and the older app-side dense+sparse+RRF path.
     """
+    supports_native_hybrid: bool                                              # capability flag
+
     def setup(self) -> None: ...                                              # create schema/indexes
-    def upsert(self, chunks: list[Chunk], vectors: np.ndarray) -> None: ...   # write chunks+vectors
+    # `sparse_vectors` is optional — only Qdrant-with-sparse uses it; other backends ignore it.
+    def upsert(self, chunks: list[Chunk], vectors: np.ndarray, sparse_vectors=None) -> None: ...
     def dense_search(self, query_vec: np.ndarray, k: int) -> list[Hit]: ...   # vector similarity search
     def sparse_search(self, query_text: str, k: int) -> list[Hit]: ...        # keyword/full-text search
 
@@ -81,6 +87,8 @@ class PgVectorStore:
     approximate dense search, and Postgres' native full-text search (`tsvector` + GIN index)
     for the sparse side. Everything lives in one table, one database — operationally simple.
     """
+
+    supports_native_hybrid = False  # pgvector fuses dense+sparse app-side (RRF in retrieval.py)
 
     def __init__(self, cfg: VectorStoreConfig, dims: int):
         """Remember the connection config and the vector dimensionality (needed for the schema)."""
@@ -115,8 +123,12 @@ class PgVectorStore:
                 ON {self._cfg.collection} USING GIN (fts)""")
             conn.commit()  # persist all the DDL above
 
-    def upsert(self, chunks: list[Chunk], vectors: np.ndarray) -> None:
-        """Insert each (chunk, vector) pair as a row. `vectors[i]` is the embedding of `chunks[i]`."""
+    def upsert(self, chunks: list[Chunk], vectors: np.ndarray, sparse_vectors=None) -> None:
+        """Insert each (chunk, vector) pair as a row. `vectors[i]` is the embedding of `chunks[i]`.
+
+        `sparse_vectors` is accepted for interface compatibility but IGNORED here: pgvector's
+        sparse side is the generated full-text column, not a learned sparse vector.
+        """
         import psycopg
         with psycopg.connect(self._cfg.dsn) as conn, conn.cursor() as cur:
             # Pair up chunks with their vectors and insert row by row.
@@ -165,54 +177,144 @@ class PgVectorStore:
 class QdrantStore:
     """Backend 2 — Qdrant, a purpose-built vector database.
 
-    Uses Qdrant's current `query_points` API with NAMED vectors (we name our vector "dense",
-    leaving room to add a named sparse vector later for true hybrid). Payload (text/source/
-    page) is stored next to each point so hits are self-describing.
+    Uses Qdrant's current `query_points` API with NAMED vectors. We always have a "dense" vector;
+    when `enable_sparse` is set we ALSO store a named "sparse" vector (SPLADE/BM42) and fuse the
+    two server-side via query_points prefetch + RRF — this is "true" hybrid search. Payload
+    (text/source/page) is stored next to each point so hits are self-describing.
     """
 
-    def __init__(self, cfg: VectorStoreConfig, dims: int):
-        """Remember connection config + vector dimensionality."""
+    # Class-level default; the instance overrides it in __init__ based on enable_sparse.
+    supports_native_hybrid = False
+
+    def __init__(self, cfg: VectorStoreConfig, dims: int, enable_sparse: bool = False):
+        """Remember connection config + vector dimensionality, and whether sparse hybrid is on.
+
+        Parameters
+        ----------
+        cfg, dims : as before.
+        enable_sparse : bool
+            When True, the collection carries a named "sparse" vector and `hybrid_search` is
+            available — the Retriever will prefer it over the app-side RRF path.
+        """
         self._cfg = cfg
         self._dims = dims
+        self._enable_sparse = enable_sparse
+        # Advertise the capability on the instance so Retriever can branch on it.
+        self.supports_native_hybrid = enable_sparse
+        self._client_instance = None   # cached client (see _client)
 
     def _client(self):
-        """Build and return a QdrantClient from the configured url/api_key.
+        """Return a single, cached QdrantClient for this store.
 
-        Helper so every method gets a fresh client without repeating connection code.
+        WHY CACHE: an in-memory Qdrant lives INSIDE the client object — a fresh client each call
+        would be a brand-new empty database, so upsert and search would never see the same data.
+        Caching one client makes in-memory mode work and is more efficient for remote mode too.
+
+        MODES (chosen by the configured url):
+          - ":memory:"  → an embedded, in-process Qdrant (zero setup; data is per-process, ephemeral).
+                          Perfect for the "bring your own keys" demo: testers need no Qdrant account.
+          - a URL       → a real Qdrant server / Qdrant Cloud (persistent, shared).
         """
-        from qdrant_client import QdrantClient
-        # NOTE: this debug print leaks the api_key to stdout — useful while learning/debugging,
-        # but you'd remove it (or mask the key) before production.
-        print(f"connecting to Qdrant at {self._cfg.url} with api_key={self._cfg.api_key}")
-        # `or None` turns an empty-string api_key into None (local Qdrant needs no key).
-        return QdrantClient(url=self._cfg.url, api_key=self._cfg.api_key or None)
+        if self._client_instance is None:
+            from qdrant_client import QdrantClient
+            url = (self._cfg.url or "").strip()
+            if url in (":memory:", "memory", ""):
+                # Embedded in-process vector DB — no server, no key, nothing to deploy.
+                self._client_instance = QdrantClient(location=":memory:")
+            else:
+                self._client_instance = QdrantClient(url=url, api_key=self._cfg.api_key or None)
+        return self._client_instance
 
     def setup(self) -> None:
-        """Create the collection if it doesn't already exist (idempotent)."""
+        """Create the collection if it doesn't already exist (idempotent).
+
+        When sparse is enabled we additionally declare a named "sparse" vector. Sparse vectors
+        live in their own config map (`sparse_vectors_config`) separate from dense vectors.
+        """
         from qdrant_client import models
         client = self._client()
         # List existing collection names so we don't recreate (which would error / wipe).
         existing = [c.name for c in client.get_collections().collections]
         if self._cfg.collection not in existing:
+            # Sparse vectors are only declared when enabled; otherwise pass None.
+            sparse_cfg = ({"sparse": models.SparseVectorParams()}
+                          if self._enable_sparse else None)
             client.create_collection(
                 collection_name=self._cfg.collection,
-                # Declare a single NAMED vector "dense" of our dimensionality, scored by cosine.
+                # Named DENSE vector of our dimensionality, scored by cosine.
                 vectors_config={"dense": models.VectorParams(
-                    size=self._dims, distance=models.Distance.COSINE)})
+                    size=self._dims, distance=models.Distance.COSINE)},
+                # Named SPARSE vector (SPLADE/BM42). Qdrant scores sparse by dot product.
+                sparse_vectors_config=sparse_cfg)
 
-    def upsert(self, chunks: list[Chunk], vectors: np.ndarray) -> None:
-        """Write chunks + vectors as Qdrant points, with provenance stored in each payload."""
+    def upsert(self, chunks: list[Chunk], vectors: np.ndarray, sparse_vectors=None) -> None:
+        """Write chunks + vectors as Qdrant points, with provenance stored in each payload.
+
+        Parameters
+        ----------
+        chunks, vectors : the chunks and their DENSE embeddings (vectors[i] ↔ chunks[i]).
+        sparse_vectors : list[SparseVector] | None
+            Optional learned sparse embeddings (one per chunk). When provided AND sparse is
+            enabled, each point also gets a named "sparse" vector for true hybrid search.
+        """
         from qdrant_client import models
         client = self._client()
-        # Build one PointStruct per chunk. `id=i` uses the batch index as the point id;
-        # `vector={"dense": ...}` matches the named vector declared in setup(); `payload`
-        # carries the citation metadata + the text itself.
-        points = [models.PointStruct(
-            id=i, vector={"dense": vec.tolist()},
-            payload={"text": ch.text, "source": ch.source, "page": ch.page})
-            for i, (ch, vec) in enumerate(zip(chunks, vectors))]
+        points = []
+        for i, (ch, vec) in enumerate(zip(chunks, vectors)):
+            # Every point has the dense vector under the "dense" name.
+            vector = {"dense": vec.tolist()}
+            # If we computed sparse vectors, attach the matching one as the "sparse" named vector.
+            if self._enable_sparse and sparse_vectors is not None:
+                sv = sparse_vectors[i]
+                vector["sparse"] = models.SparseVector(indices=sv.indices, values=sv.values)
+            points.append(models.PointStruct(
+                id=i, vector=vector,
+                payload={"text": ch.text, "source": ch.source, "page": ch.page}))
         # `wait=True` blocks until the write is durably applied — important before searching.
         client.upsert(collection_name=self._cfg.collection, points=points, wait=True)
+
+    def hybrid_search(self, dense_vec: np.ndarray, sparse_vec, k: int) -> list[Hit]:
+        """TRUE hybrid search: fuse dense + sparse INSIDE Qdrant with prefetch + server-side RRF.
+
+        How it works
+        ------------
+        `query_points` runs two PREFETCH sub-queries — one over the "dense" vector, one over the
+        "sparse" vector — each pulling a candidate pool, then fuses them with Reciprocal Rank
+        Fusion (`FusionQuery(fusion=RRF)`) on the server. One round-trip, no app-side fusion, and
+        the sparse side is a learned SPLADE/BM42 vector (term importance), not a keyword filter.
+
+        Parameters
+        ----------
+        dense_vec : np.ndarray
+            The dense query embedding.
+        sparse_vec : SparseVector
+            The learned sparse query embedding (indices + values).
+        k : int
+            How many fused results to return.
+
+        Returns
+        -------
+        list[Hit]
+            Fused, ranked results (score is the RRF fused score from Qdrant).
+        """
+        from qdrant_client import models
+        # Pull a wider candidate pool per arm than k so fusion has material to work with.
+        prefetch_limit = max(k * 4, 20)
+        res = self._client().query_points(
+            collection_name=self._cfg.collection,
+            prefetch=[
+                # Arm 1: dense nearest neighbors.
+                models.Prefetch(query=dense_vec.tolist(), using="dense", limit=prefetch_limit),
+                # Arm 2: sparse (SPLADE/BM42) matches.
+                models.Prefetch(
+                    query=models.SparseVector(indices=sparse_vec.indices, values=sparse_vec.values),
+                    using="sparse", limit=prefetch_limit),
+            ],
+            # Fuse the two prefetch arms with Reciprocal Rank Fusion on the server.
+            query=models.FusionQuery(fusion=models.Fusion.RRF),
+            limit=k, with_payload=True)
+        return [Hit(int(p.id), p.payload["text"], p.payload["source"], p.payload["page"], float(p.score))
+                for p in res.points]
 
     def dense_search(self, query_vec: np.ndarray, k: int) -> list[Hit]:
         """Vector similarity search: return the k nearest points to the query vector."""
@@ -244,7 +346,7 @@ class QdrantStore:
                 for p in res[0]]
 
 
-def make_store(cfg: VectorStoreConfig, dims: int) -> VectorStore:
+def make_store(cfg: VectorStoreConfig, dims: int, enable_sparse: bool = False) -> VectorStore:
     """Factory: return the concrete store implementation named in the config.
 
     Parameters
@@ -253,6 +355,9 @@ def make_store(cfg: VectorStoreConfig, dims: int) -> VectorStore:
         Provides `backend` ("qdrant" | "pgvector") plus connection details.
     dims : int
         Vector dimensionality (forwarded to the store so it builds a matching schema).
+    enable_sparse : bool
+        Whether to enable native dense+sparse hybrid (only honored by the Qdrant backend; the
+        caller sets this from RetrievalConfig.sparse_backend == "splade").
 
     Returns
     -------
@@ -265,7 +370,7 @@ def make_store(cfg: VectorStoreConfig, dims: int) -> VectorStore:
         On an unrecognized backend name.
     """
     if cfg.backend == "pgvector":
-        return PgVectorStore(cfg, dims)
+        return PgVectorStore(cfg, dims)  # pgvector ignores enable_sparse (uses Postgres FTS)
     if cfg.backend == "qdrant":
-        return QdrantStore(cfg, dims)
+        return QdrantStore(cfg, dims, enable_sparse=enable_sparse)
     raise ValueError(f"unknown vector store backend: {cfg.backend}")

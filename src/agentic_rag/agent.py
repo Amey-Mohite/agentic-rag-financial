@@ -96,19 +96,121 @@ class AgenticRAG:
         """Validate config, then build every component the loop needs."""
         cfg.validate()                                    # fail fast on misconfiguration
         self.cfg = cfg
-        self.embedder = Embedder(cfg.embedding)           # query embedder
-        self.store = make_store(cfg.vector_store, cfg.embedding.dims)  # vector DB backend
-        self.retriever = Retriever(self.store, self.embedder, cfg.retrieval)  # search orchestrator
+        # Pass the (optional) runtime OpenAI key explicitly; falls back to env when None.
+        self.embedder = Embedder(cfg.embedding, api_key=cfg.openai_api_key)  # dense query embedder
+
+        # Build a learned-sparse embedder when configured, for true hybrid retrieval.
+        enable_sparse = cfg.retrieval.sparse_backend == "splade"
+        self.sparse_embedder = None
+        if enable_sparse:
+            from .embeddings import SparseEmbedder
+            self.sparse_embedder = SparseEmbedder(cfg.retrieval)
+
+        self.store = make_store(cfg.vector_store, cfg.embedding.dims, enable_sparse=enable_sparse)
+        # The retriever gets the sparse embedder so it can use native hybrid where supported.
+        self.retriever = Retriever(self.store, self.embedder, cfg.retrieval,
+                                   sparse_embedder=self.sparse_embedder)
+
+        # Conversational memory store (per-session history) — see memory.py.
+        from .memory import make_session_store
+        self.sessions = make_session_store(cfg.memory) if cfg.memory.enabled else None
+
         from anthropic import Anthropic  # local import: only needed to actually run the agent
-        self._llm = Anthropic()          # reads ANTHROPIC_API_KEY from the environment
+        # Pass the (optional) runtime Anthropic key explicitly; falls back to env when None.
+        self._llm = Anthropic(api_key=cfg.anthropic_api_key) if cfg.anthropic_api_key else Anthropic()
 
     @classmethod
     def from_config(cls, path: str) -> "AgenticRAG":
         """Convenience constructor: load AppConfig from a YAML path, then build the system."""
         return cls(AppConfig.from_yaml(path))
 
+    def ingest(self, paths: list[str]) -> int:
+        """Ingest documents into the index, REUSING this pipeline's already-warm components.
+
+        The API's /upload endpoint calls this so each upload reuses the loaded embedder, store, and
+        sparse model instead of rebuilding them (which would reload the SPLADE/BM42 model every time).
+
+        Parameters
+        ----------
+        paths : list[str]
+            File paths (or globs) to extract → chunk → embed → store.
+
+        Returns
+        -------
+        int
+            Number of chunks stored.
+        """
+        from .ingest import ingest_paths  # local import to avoid a circular import at module load
+        return ingest_paths(self.cfg, paths, embedder=self.embedder, store=self.store,
+                            sparse_embedder=self.sparse_embedder)
+
+    # ---- request-shaping helpers (prompt caching + conversational memory) --------------------
+    def _system_param(self):
+        """Return the `system` argument, marked for PROMPT CACHING when enabled.
+
+        With caching on, we send `system` as a list of content blocks and tag the (large, static)
+        prompt with `cache_control: ephemeral`. Anthropic then caches those tokens; subsequent
+        calls in the same loop/turn re-read them at ~10% of the input price and lower latency.
+        With caching off, we send the plain string.
+        """
+        if self.cfg.generator.use_prompt_caching:
+            return [{"type": "text", "text": SYSTEM_PROMPT,
+                     "cache_control": {"type": "ephemeral"}}]
+        return SYSTEM_PROMPT
+
+    def _tools_param(self):
+        """Return the `tools` argument, with a cache breakpoint on the last tool when enabled.
+
+        Tool definitions are static too; caching them (cache_control on the final tool) avoids
+        re-billing the full schema on every step of the agent loop.
+        """
+        if self.cfg.generator.use_prompt_caching:
+            tool = dict(SEARCH_TOOL)
+            tool["cache_control"] = {"type": "ephemeral"}
+            return [tool]
+        return [SEARCH_TOOL]
+
+    def _initial_messages(self, question: str, session_id: str | None) -> list[dict]:
+        """Build the starting message list: prior session turns (if any) + the new question."""
+        messages: list[dict] = []
+        if session_id and self.sessions is not None:
+            # Replay the clean transcript so follow-ups ("and the year before?") have context.
+            messages.extend(self.sessions.history(session_id))
+        messages.append({"role": "user", "content": question})
+        return messages
+
+    @staticmethod
+    def _citations_from(ledger: dict) -> list[dict]:
+        """Turn the provenance ledger into a citation list, sorted by score (best first)."""
+        return [{"chunk_id": h.id, "source": h.source, "page": h.page, "score": round(h.score, 4)}
+                for h in sorted(ledger.values(), key=lambda h: h.score, reverse=True)]
+
+    def _run_tool_blocks(self, resp, ledger: dict) -> tuple[list, int]:
+        """Service every tool_use block in a model response: search, update ledger, build results.
+
+        Returns (tool_result_blocks, n_searches). Shared by answer() and answer_stream().
+        """
+        results, n = [], 0
+        for block in resp.content:
+            if block.type != "tool_use":
+                continue  # skip text blocks the model may include alongside the tool call
+            hits = self.retriever.search(**block.input)  # block.input == {"query": ...}
+            n += 1
+            for h in hits:  # merge into ledger, keeping the highest score per chunk id
+                prev = ledger.get(h.id)
+                if prev is None or h.score > prev.score:
+                    ledger[h.id] = h
+            # The API requires a tool_result referencing the tool_use id, with string content.
+            results.append({
+                "type": "tool_result", "tool_use_id": block.id,
+                "content": json.dumps([
+                    {"chunk_id": h.id, "source": h.source, "page": h.page, "text": h.text}
+                    for h in hits]),
+            })
+        return results, n
+
     # ------------------------------------------------------------------------------------------
-    def answer(self, question: str) -> AgentAnswer:
+    def answer(self, question: str, session_id: str | None = None) -> AgentAnswer:
         """Run the agentic loop and return a grounded, cited answer.
 
         THE LOOP (in words):
@@ -122,14 +224,17 @@ class AgenticRAG:
         ----------
         question : str
             The user's natural-language question.
+        session_id : str | None
+            When given (and memory enabled), prior turns for this session are prepended so
+            follow-up questions resolve in context, and this exchange is saved on completion.
 
         Returns
         -------
         AgentAnswer
             text + citations + steps + usage.
         """
-        # `messages` is the running conversation we send to the model each turn.
-        messages = [{"role": "user", "content": question}]
+        # Running conversation: prior session turns (if any) + this question.
+        messages = self._initial_messages(question, session_id)
         # The provenance ledger: chunk id -> the best (highest-scoring) Hit seen for that chunk.
         ledger: dict[int, Hit] = {}
         # Counters: number of search calls, and cumulative input/output tokens.
@@ -137,13 +242,13 @@ class AgenticRAG:
 
         # Loop until the model answers or we hit the safety cap.
         while steps <= self.cfg.agent.max_steps:
-            # --- Ask the model. It sees the system prompt, the search tool, and the convo so far.
+            # --- Ask the model. System prompt + tools are cache-tagged when caching is enabled.
             resp = self._llm.messages.create(
                 model=self.cfg.generator.model,
                 max_tokens=self.cfg.generator.max_tokens,
                 temperature=self.cfg.generator.temperature,
-                system=SYSTEM_PROMPT,
-                tools=[SEARCH_TOOL],
+                system=self._system_param(),
+                tools=self._tools_param(),
                 messages=messages,
             )
             # Accumulate token usage for cost reporting.
@@ -152,44 +257,90 @@ class AgenticRAG:
 
             # --- CASE A: the model did NOT ask for a tool → it produced the final answer.
             if resp.stop_reason != "tool_use":
-                # Concatenate all text blocks into the answer string.
                 text = "".join(b.text for b in resp.content if b.type == "text")
-                # Turn the ledger into a citation list, sorted by score (best first).
-                citations = [
-                    {"chunk_id": h.id, "source": h.source, "page": h.page, "score": round(h.score, 4)}
-                    for h in sorted(ledger.values(), key=lambda h: h.score, reverse=True)
-                ]
-                return AgentAnswer(text=text, citations=citations, steps=steps,
+                # Persist the clean (question, answer) exchange to conversational memory.
+                if session_id and self.sessions is not None:
+                    self.sessions.append(session_id, question, text)
+                return AgentAnswer(text=text, citations=self._citations_from(ledger), steps=steps,
                                    usage={"input_tokens": in_tok, "output_tokens": out_tok})
 
-            # --- CASE B: the model asked to use the tool. Record its turn, then service the calls.
-            messages.append({"role": "assistant", "content": resp.content})  # echo back its request
-            results = []  # collect one tool_result per tool_use block
-            for block in resp.content:
-                if block.type != "tool_use":
-                    continue  # skip any text blocks the model included alongside the tool call
-                # Run the REAL retriever with the model's requested query (block.input = {"query": ...}).
-                hits = self.retriever.search(**block.input)
-                steps += 1  # count this search
-                # Merge hits into the ledger, keeping the highest score per chunk id (dedupe).
-                for h in hits:
-                    prev = ledger.get(h.id)
-                    if prev is None or h.score > prev.score:
-                        ledger[h.id] = h
-                # Build the tool_result the API expects: it must reference the tool_use id and
-                # carry a string content. We JSON-encode the chunks (id/source/page/text) for the model.
-                results.append({
-                    "type": "tool_result", "tool_use_id": block.id,
-                    "content": json.dumps([
-                        {"chunk_id": h.id, "source": h.source, "page": h.page, "text": h.text}
-                        for h in hits]),
-                })
-            # Feed all tool results back as the next user turn, then loop so the model can continue.
+            # --- CASE B: the model asked to search. Echo its turn, run the tools, feed results back.
+            messages.append({"role": "assistant", "content": resp.content})
+            results, n = self._run_tool_blocks(resp, ledger)
+            steps += n
             messages.append({"role": "user", "content": results})
 
         # --- SAFETY STOP: we exhausted max_steps without the model committing to an answer.
-        citations = [{"chunk_id": h.id, "source": h.source, "page": h.page, "score": round(h.score, 4)}
-                     for h in sorted(ledger.values(), key=lambda h: h.score, reverse=True)]
         return AgentAnswer(text="Stopped after max_steps without a final answer.",
-                           citations=citations, steps=steps,
+                           citations=self._citations_from(ledger), steps=steps,
                            usage={"input_tokens": in_tok, "output_tokens": out_tok})
+
+    # ------------------------------------------------------------------------------------------
+    def answer_stream(self, question: str, session_id: str | None = None):
+        """Generator version of answer() that STREAMS the final answer token-by-token.
+
+        Yields dict EVENTS so a web layer (see api.py /ask/stream) can forward them over SSE:
+          {"type": "step",     "query": "...", "n_hits": 5}   # each retrieval the agent runs
+          {"type": "token",    "text": "..."}                 # incremental answer text
+          {"type": "final",    "answer": "...", "citations": [...], "steps": N, "usage": {...}}
+
+        WHY STREAM: the tool-using steps still happen up front (you can't stream a decision to
+        search), but once the model starts writing the ANSWER we stream those tokens so the UI
+        shows text immediately instead of waiting for the whole response — a big UX win.
+        """
+        messages = self._initial_messages(question, session_id)
+        ledger: dict[int, Hit] = {}
+        steps = in_tok = out_tok = 0
+
+        while steps <= self.cfg.agent.max_steps:
+            # First, a NON-streamed call to discover whether the model wants to search or answer.
+            resp = self._llm.messages.create(
+                model=self.cfg.generator.model,
+                max_tokens=self.cfg.generator.max_tokens,
+                temperature=self.cfg.generator.temperature,
+                system=self._system_param(),
+                tools=self._tools_param(),
+                messages=messages,
+            )
+            in_tok += resp.usage.input_tokens
+            out_tok += resp.usage.output_tokens
+
+            if resp.stop_reason == "tool_use":
+                # Announce each search as a step event, then feed results back and continue.
+                messages.append({"role": "assistant", "content": resp.content})
+                for block in resp.content:
+                    if block.type == "tool_use":
+                        yield {"type": "step", "query": block.input.get("query")}
+                results, n = self._run_tool_blocks(resp, ledger)
+                steps += n
+                messages.append({"role": "user", "content": results})
+                continue
+
+            # FINAL turn: re-issue WITHOUT tools and STREAM the answer text token-by-token.
+            text_parts = []
+            with self._llm.messages.stream(
+                model=self.cfg.generator.model,
+                max_tokens=self.cfg.generator.max_tokens,
+                temperature=self.cfg.generator.temperature,
+                system=self._system_param(),
+                messages=messages,
+            ) as stream:
+                for delta in stream.text_stream:   # yields the incremental answer text
+                    text_parts.append(delta)
+                    yield {"type": "token", "text": delta}
+                final = stream.get_final_message()
+                in_tok += final.usage.input_tokens
+                out_tok += final.usage.output_tokens
+
+            answer_text = "".join(text_parts)
+            if session_id and self.sessions is not None:
+                self.sessions.append(session_id, question, answer_text)
+            yield {"type": "final", "answer": answer_text,
+                   "citations": self._citations_from(ledger), "steps": steps,
+                   "usage": {"input_tokens": in_tok, "output_tokens": out_tok}}
+            return
+
+        # Safety stop as a final event.
+        yield {"type": "final", "answer": "Stopped after max_steps without a final answer.",
+               "citations": self._citations_from(ledger), "steps": steps,
+               "usage": {"input_tokens": in_tok, "output_tokens": out_tok}}

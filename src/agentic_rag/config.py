@@ -71,6 +71,11 @@ class GeneratorConfig:
     model: str = "claude-sonnet-4-6"  # the chat model that reasons + answers
     max_tokens: int = 1024            # cap on the model's output length per call
     temperature: float = 0.0          # 0.0 = deterministic; we want factual, repeatable answers
+    # PROMPT CACHING (cost optimization). When True, the agent marks the system prompt + tool
+    # definitions with cache_control so Anthropic caches those tokens. In a multi-step agent loop
+    # (and across conversation turns) the same large preamble is re-sent every call; caching it
+    # makes repeat reads ~10% of the price and lower latency. See agent.py.
+    use_prompt_caching: bool = True
 
 
 @dataclass
@@ -114,16 +119,48 @@ class RetrievalConfig:
     """Knobs for the retrieval stage (see retrieval.py)."""
     top_k: int = 5                 # how many chunks to finally hand to the LLM
     candidate_pool: int = 20       # how many to pull from the store BEFORE reranking/trimming
-    use_hybrid: bool = True        # combine dense (vector) + sparse (keyword) search?
+    use_hybrid: bool = True        # combine dense (vector) + sparse search?
     use_reranker: bool = True      # apply a cross-encoder to re-score the candidate pool?
     reranker_model: str = "BAAI/bge-reranker-v2-m3"  # the cross-encoder model id
     rrf_k: int = 60                # constant in Reciprocal Rank Fusion (60 is the standard value)
+    # SPARSE BACKEND — how the "sparse" half of hybrid retrieval is produced:
+    #   "keyword" : the original simple full-text/keyword fallback (no extra deps).
+    #   "splade"  : a learned sparse vector (SPLADE / BM42) via fastembed, fused INSIDE Qdrant
+    #               using query_points prefetch + server-side RRF. This is "true" hybrid search.
+    sparse_backend: Literal["keyword", "splade"] = "splade"
+    # The fastembed sparse model id used when sparse_backend == "splade". BM42 is fast and strong
+    # for short-to-medium passages; "prithivida/Splade_PP_en_v1" is the classic SPLADE++ option.
+    sparse_model: str = "Qdrant/bm42-all-minilm-l6-v2-attentions"
 
 
 @dataclass
 class AgentConfig:
     """Limits on the agentic loop (see agent.py)."""
     max_steps: int = 6  # max number of tool/search calls before we force-stop (prevents runaway loops/cost)
+
+
+@dataclass
+class MemoryConfig:
+    """Conversational memory settings (see memory.py).
+
+    When enabled, the API/agent keep a short rolling history of prior user/assistant turns keyed by
+    a session id, so follow-up questions like "and the year before?" resolve against earlier context
+    instead of being treated as standalone queries.
+    """
+    enabled: bool = True       # turn conversational memory on/off
+    max_turns: int = 6         # how many of the most recent (user,assistant) turns to retain
+    backend: Literal["memory"] = "memory"  # "memory" = in-process dict; swap for Redis in prod
+
+
+@dataclass
+class IngestionConfig:
+    """Document-ingestion settings (see ingest.py)."""
+    # TABLE-AWARE EXTRACTION. Financial filings are full of numeric tables that naive text
+    # extraction flattens into unreadable "soup", destroying row/column relationships. When True,
+    # PDFs are parsed with pdfplumber and tables are rendered as Markdown pipe-tables so the
+    # structure (and therefore the numbers) survives into the embeddings. Falls back to plain
+    # text extraction if pdfplumber isn't installed.
+    extract_tables: bool = True
 
 
 @dataclass
@@ -141,6 +178,15 @@ class AppConfig:
     chunking: ChunkingConfig = field(default_factory=ChunkingConfig)
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
+    ingestion: IngestionConfig = field(default_factory=IngestionConfig)
+
+    # RUNTIME API KEYS (optional). Normally the OpenAI/Anthropic SDKs read keys from the
+    # environment. But the "bring your own keys" web UI lets a tester paste keys at runtime; when
+    # set here they're passed EXPLICITLY to the clients (so multiple sessions with different keys
+    # don't clash via global env). Left None → the SDKs fall back to the environment.
+    openai_api_key: Optional[str] = None
+    anthropic_api_key: Optional[str] = None
 
     @staticmethod
     def from_yaml(path: str) -> "AppConfig":
@@ -177,6 +223,8 @@ class AppConfig:
             chunking=ChunkingConfig(**raw.get("chunking", {})),
             retrieval=RetrievalConfig(**raw.get("retrieval", {})),
             agent=AgentConfig(**raw.get("agent", {})),
+            memory=MemoryConfig(**raw.get("memory", {})),
+            ingestion=IngestionConfig(**raw.get("ingestion", {})),
         )
 
     def validate(self) -> None:

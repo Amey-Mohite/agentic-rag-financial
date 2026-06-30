@@ -1,0 +1,51 @@
+# ============================================================================
+# "Lite" config for SMALL free tiers (e.g. Render free = 512 MB RAM).
+# It disables the heavy local models so the app fits in tiny memory:
+#   - use_reranker: false   → no 600 MB cross-encoder loaded
+#   - sparse_backend: keyword → no SPLADE/BM42 model loaded
+# Retrieval is dense-only + keyword (still useful), and there is NO local model RAM cost.
+# Select it with RAG_CONFIG=config.lite.yaml. Point QDRANT_URL/QDRANT_API_KEY at Qdrant Cloud.
+# ============================================================================
+embedding:
+  model: text-embedding-3-large
+  dims: 3072
+
+generator:
+  model: claude-sonnet-4-6
+  max_tokens: 1024
+  temperature: 0.0
+  use_prompt_caching: true
+
+vector_store:
+  backend: qdrant
+  url: ${QDRANT_URL}            # your Qdrant Cloud cluster URL
+  api_key: ${QDRANT_API_KEY}    # your Qdrant Cloud API key
+  collection: filings
+  hnsw_m: 16
+  hnsw_ef_construction: 64
+
+chunking:
+  strategy: recursive
+  chunk_tokens: 500
+  overlap_tokens: 50
+
+retrieval:
+  top_k: 5
+  candidate_pool: 20
+  use_hybrid: true
+  use_reranker: false           # OFF — the cross-encoder is the biggest memory user
+  reranker_model: BAAI/bge-reranker-v2-m3
+  rrf_k: 60
+  sparse_backend: keyword       # keyword fallback (no learned-sparse model to load)
+  sparse_model: Qdrant/bm42-all-minilm-l6-v2-attentions
+
+agent:
+  max_steps: 4
+
+memory:
+  enabled: true
+  max_turns: 6
+  backend: memory
+
+ingestion:
+  extract_tables: false         # pdfplumber is heavier; turn off on the smallest tiers

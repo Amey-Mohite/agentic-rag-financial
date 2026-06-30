@@ -1,0 +1,51 @@
+# ============================================================================
+# Config used INSIDE Kubernetes / Minikube (selected via RAG_CONFIG=config.k8s.yaml).
+# Differences from the local config.yaml:
+#   - vector_store.backend = qdrant, pointing at the in-cluster Qdrant Service via ${QDRANT_URL}
+#   - sparse_backend = keyword  → no extra SPLADE/BM42 model download, lighter & faster to boot
+#     (flip to 'splade' + install the [hybrid] extra if you want learned-sparse hybrid in-cluster)
+#   - agent.max_steps lowered for snappier demo responses
+# ============================================================================
+embedding:
+  model: text-embedding-3-large
+  dims: 3072
+
+generator:
+  model: claude-sonnet-4-6
+  max_tokens: 1024
+  temperature: 0.0
+  use_prompt_caching: true
+
+vector_store:
+  backend: qdrant
+  url: ${QDRANT_URL}            # set by the Deployment env to http://qdrant:6333
+  api_key: ${QDRANT_API_KEY}    # empty for the in-cluster Qdrant (no auth); fine to leave unset
+  collection: filings
+  hnsw_m: 16
+  hnsw_ef_construction: 64
+
+chunking:
+  strategy: recursive
+  chunk_tokens: 500
+  overlap_tokens: 50
+
+retrieval:
+  top_k: 5
+  candidate_pool: 20
+  use_hybrid: true
+  use_reranker: true
+  reranker_model: BAAI/bge-reranker-v2-m3
+  rrf_k: 60
+  sparse_backend: keyword       # lighter for the demo; 'splade' needs the [hybrid] extra + a model download
+  sparse_model: Qdrant/bm42-all-minilm-l6-v2-attentions
+
+agent:
+  max_steps: 4
+
+memory:
+  enabled: true
+  max_turns: 6
+  backend: memory
+
+ingestion:
+  extract_tables: true

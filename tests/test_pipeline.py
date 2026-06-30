@@ -158,3 +158,118 @@ def test_agent_loop_multi_hop_and_ledger(monkeypatch):
     score1 = next(c["score"] for c in out.citations if c["chunk_id"] == 1)
     assert score1 == 9.0
     assert out.citations[0]["score"] == 9.0        # citations are sorted by score descending
+
+
+# ============================================================================================
+# Tests for the production upgrades: memory, table extraction, prompt caching, hybrid routing.
+# ============================================================================================
+def test_memory_store_roundtrip_and_bound():
+    """InMemorySessionStore should store turns per session, isolate sessions, and bound length."""
+    from agentic_rag.config import MemoryConfig
+    from agentic_rag.memory import InMemorySessionStore
+    store = InMemorySessionStore(MemoryConfig(max_turns=2))  # keep last 2 exchanges
+    store.append("s1", "q1", "a1")
+    store.append("s1", "q2", "a2")
+    store.append("s1", "q3", "a3")                 # this should evict the oldest (q1/a1)
+    hist = store.history("s1")
+    assert [m["content"] for m in hist] == ["q2", "a2", "q3", "a3"]  # bounded to 2 exchanges
+    assert store.history("s2") == []               # sessions are isolated
+    store.reset("s1")
+    assert store.history("s1") == []               # reset clears history
+
+
+def test_table_to_markdown_preserves_structure():
+    """_table_to_markdown should render a 2-D table as an aligned Markdown pipe-table."""
+    from agentic_rag.ingest import _table_to_markdown
+    md = _table_to_markdown([["Metric", "FY25", "FY24"], ["Revenue", "294,866", "298,085"]])
+    lines = md.splitlines()
+    assert lines[0] == "| Metric | FY25 | FY24 |"  # header row
+    assert set(lines[1].replace(" ", "")) <= set("|-")  # separator row is just | and -
+    assert "| Revenue | 294,866 | 298,085 |" in md  # numbers stay aligned to their columns
+
+
+def test_prompt_caching_param_shaping():
+    """_system_param/_tools_param add cache_control when enabled, and are plain when disabled."""
+    from agentic_rag import agent as agent_mod
+    from agentic_rag.config import AppConfig
+
+    rag = agent_mod.AgenticRAG.__new__(agent_mod.AgenticRAG)  # bare instance, no real clients
+    rag.cfg = AppConfig()
+    rag.cfg.generator.use_prompt_caching = True
+    sys_p, tools_p = rag._system_param(), rag._tools_param()
+    assert isinstance(sys_p, list) and sys_p[0]["cache_control"] == {"type": "ephemeral"}
+    assert tools_p[0]["cache_control"] == {"type": "ephemeral"}
+
+    rag.cfg.generator.use_prompt_caching = False
+    assert isinstance(rag._system_param(), str)        # plain string when caching off
+    assert "cache_control" not in rag._tools_param()[0]
+
+
+def test_agent_memory_replays_history(monkeypatch):
+    """With a session_id, the agent should prepend prior turns and persist the new exchange."""
+    from agentic_rag import agent as agent_mod
+    from agentic_rag.config import AppConfig, MemoryConfig
+    from agentic_rag.memory import InMemorySessionStore
+
+    seen_messages = {}
+
+    class Usage:
+        input_tokens = 10; output_tokens = 2
+
+    class Block:
+        def __init__(self, **kw): self.__dict__.update(kw)
+
+    class Resp:
+        def __init__(self, content, stop): self.content = content; self.stop_reason = stop; self.usage = Usage()
+
+    class FakeMessages:
+        def create(self, **kw):
+            seen_messages["messages"] = kw["messages"]   # capture what the agent sent
+            return Resp([Block(type="text", text="It was $390B.")], "end_turn")
+
+    class FakeAnthropic:
+        def __init__(self): self.messages = FakeMessages()
+
+    rag = agent_mod.AgenticRAG.__new__(agent_mod.AgenticRAG)
+    rag.cfg = AppConfig()
+    rag.sessions = InMemorySessionStore(MemoryConfig())
+    rag._llm = FakeAnthropic()
+    rag.sessions.append("sess", "What was FY25 revenue?", "It was $391B.")  # a prior turn exists
+
+    out = rag.answer("And the year before?", session_id="sess")
+    # The request must have replayed the prior 2 messages BEFORE the new question (3 total).
+    assert len(seen_messages["messages"]) == 3
+    assert seen_messages["messages"][0]["content"] == "What was FY25 revenue?"
+    assert seen_messages["messages"][-1]["content"] == "And the year before?"
+    # The new exchange is now persisted (prior 1 + new 1 = 2 exchanges = 4 messages).
+    assert len(rag.sessions.history("sess")) == 4
+    assert out.text == "It was $390B."
+
+
+def test_retriever_prefers_native_hybrid():
+    """When the store supports native hybrid AND a sparse embedder is present, use hybrid_search."""
+    from agentic_rag.config import RetrievalConfig
+    from agentic_rag.stores import Hit
+    from agentic_rag.retrieval import Retriever
+
+    calls = {"hybrid": 0, "dense": 0}
+
+    class FakeStore:
+        supports_native_hybrid = True
+        def hybrid_search(self, dvec, svec, k):
+            calls["hybrid"] += 1
+            return [Hit(1, "x", "A", 1, 0.5)]
+        def dense_search(self, qvec, k):
+            calls["dense"] += 1
+            return [Hit(2, "y", "B", 1, 0.4)]
+
+    class FakeDense:
+        def embed_query(self, q): return [0.0]
+    class FakeSparse:
+        def embed_query(self, q): return object()   # sparse vector stand-in
+
+    cfg = RetrievalConfig(use_hybrid=True, use_reranker=False, top_k=1, candidate_pool=5)
+    r = Retriever(FakeStore(), FakeDense(), cfg, sparse_embedder=FakeSparse())
+    hits = r.search("revenue")
+    assert calls["hybrid"] == 1 and calls["dense"] == 0   # took the native hybrid path
+    assert hits[0].id == 1

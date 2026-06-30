@@ -15,7 +15,8 @@ dependencies = [
     "anthropic>=0.40",
     "sentence-transformers>=3.0",
     "fastapi>=0.110",
-    "uvicorn[standard]>=0.29",
+    "uvicorn[standard]>=0.34",   # >=0.34 is compatible with websockets>=14 (avoids websockets.legacy import error)
+    "python-multipart>=0.0.9",   # required by FastAPI for multipart file uploads (/upload)
     "pydantic>=2.6",
     # vector stores (install the one you use; both listed for convenience)
     "psycopg[binary]>=3.2",
@@ -25,6 +26,10 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.5"]
 eval = ["ragas>=0.2", "langfuse>=3.0", "datasets>=2.0"]
+# Learned sparse vectors (SPLADE/BM42) for true Qdrant hybrid search.
+hybrid = ["fastembed>=0.4"]
+# Table-structure-aware PDF extraction so financial tables stay readable.
+tables = ["pdfplumber>=0.11"]
 
 [build-system]
 requires = ["setuptools>=68"]
