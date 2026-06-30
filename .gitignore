@@ -12,3 +12,4 @@ qdrant_data/
 .ruff_cache/
 env
 UPWORK_PORTFOLIO.md
+INTERVIEW_DEEP_DIVE.md
