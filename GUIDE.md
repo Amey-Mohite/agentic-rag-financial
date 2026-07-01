@@ -155,9 +155,26 @@ like `https://huggingface.co/spaces/<you>/agentic-rag`. Great for sharing on Upw
    ```
    (Or use the Space's **Files → Upload** button.)
 
-### 3.2 Set the port + (optionally) keys
-HF Docker Spaces expect the container on port **7860**; our image reads `$PORT`, so just add a
-**Variable** `PORT=7860` (Settings → *Variables and secrets*).
+### 3.2 The Space card metadata (required — this is what causes "config error")
+A Docker Space is configured by a **YAML block at the top of `README.md`** (the "Space card"). This
+repo's README already includes it:
+```
+---
+title: Agentic RAG Document QA
+emoji: 📄
+colorFrom: indigo
+colorTo: blue
+sdk: docker
+app_port: 8000
+pinned: false
+---
+```
+If your Space shows *"config error that prevents it from running"*, it's because this block is missing
+or malformed at the very top of the README in the Space — make sure it's there, exactly, as the first
+thing in the file. `app_port: 8000` routes HF to our container (which listens on 8000), so you do
+**not** need to set any `PORT` variable.
+
+### 3.2b (optionally) keys
 - Easiest model: leave it at that and let each visitor enter **their own** keys on the Settings tab
   with the **In-memory** store. Nothing else to configure, and it won't spend your credits.
 - Or pre-configure it yourself by adding **Secrets** `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` and (for a

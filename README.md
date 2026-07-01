@@ -1,3 +1,17 @@
+---
+title: Agentic RAG Document QA
+emoji: 📄
+colorFrom: indigo
+colorTo: blue
+sdk: docker
+app_port: 8000
+pinned: false
+---
+
+<!-- The YAML block above is the Hugging Face Spaces "Space card" — it MUST be the first thing in
+     this file, or a Docker Space fails with "config error that prevents it from running". It's
+     harmless on GitHub. `sdk: docker` + `app_port: 8000` route HF to our container (listens on 8000). -->
+
 # Agentic RAG over Documents — cited answers, hybrid retrieval, a real agent loop
 
 > Ask questions about your documents and get **answers grounded in the source**, with a citation
