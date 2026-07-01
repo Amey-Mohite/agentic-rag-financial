@@ -100,11 +100,19 @@ class AgenticRAG:
         self.embedder = Embedder(cfg.embedding, api_key=cfg.openai_api_key)  # dense query embedder
 
         # Build a learned-sparse embedder when configured, for true hybrid retrieval.
+        # GRACEFUL FALLBACK: sparse_backend="splade" needs the optional `fastembed` package. If it
+        # isn't installed, degrade to keyword retrieval instead of crashing at ingest time.
         enable_sparse = cfg.retrieval.sparse_backend == "splade"
         self.sparse_embedder = None
         if enable_sparse:
-            from .embeddings import SparseEmbedder
-            self.sparse_embedder = SparseEmbedder(cfg.retrieval)
+            try:
+                import fastembed  # noqa: F401  (import check — fails fast if the extra is missing)
+                from .embeddings import SparseEmbedder
+                self.sparse_embedder = SparseEmbedder(cfg.retrieval)
+            except Exception as e:
+                print(f"[warn] sparse_backend='splade' but fastembed is unavailable ({e}); "
+                      f"falling back to keyword retrieval. Install with: pip install fastembed")
+                enable_sparse = False
 
         self.store = make_store(cfg.vector_store, cfg.embedding.dims, enable_sparse=enable_sparse)
         # The retriever gets the sparse embedder so it can use native hybrid where supported.

@@ -193,14 +193,25 @@ def ingest_paths(cfg: AppConfig, paths: list[str], *,
     cfg.validate()                                       # fail fast on misconfig
 
     # --- Decide whether to build learned sparse vectors (SPLADE/BM42) for true hybrid search.
-    enable_sparse = cfg.retrieval.sparse_backend == "splade"
+    # If a store was passed in (API path), honor ITS capability so we don't rebuild a sparse embedder
+    # the pipeline already declined (e.g. after a fastembed fallback). Otherwise derive from config.
+    if store is not None:
+        enable_sparse = getattr(store, "supports_native_hybrid", False)
+    else:
+        enable_sparse = cfg.retrieval.sparse_backend == "splade"
 
     # Build any components not passed in (CLI path); reuse the ones provided (API path).
     if embedder is None:
-        embedder = Embedder(cfg.embedding)               # the DENSE embedding model wrapper
+        embedder = Embedder(cfg.embedding, api_key=cfg.openai_api_key)  # DENSE embedder
     if sparse_embedder is None and enable_sparse:
-        from .embeddings import SparseEmbedder
-        sparse_embedder = SparseEmbedder(cfg.retrieval)  # lazy-loads the model on first use
+        # GRACEFUL FALLBACK: splade needs the optional `fastembed` package; degrade to keyword if absent.
+        try:
+            import fastembed  # noqa: F401
+            from .embeddings import SparseEmbedder
+            sparse_embedder = SparseEmbedder(cfg.retrieval)  # lazy-loads the model on first use
+        except Exception as e:
+            print(f"[warn] sparse_backend='splade' but fastembed unavailable ({e}); using keyword.")
+            enable_sparse = False
     if store is None:
         store = make_store(cfg.vector_store, cfg.embedding.dims, enable_sparse=enable_sparse)
     store.setup()                                        # create collection (idempotent)
