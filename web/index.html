@@ -146,8 +146,8 @@
                 server). Only switch to Qdrant/Supabase if you want your uploads to persist.</li>
             <li>Click <b>Save &amp; connect</b> — it validates your keys and connects.</li>
             <li>Go to <b>Upload</b> → add a PDF / HTML / text file → <b>Vectorize</b>.</li>
-            <li>Go to <b>Ask</b> → ask a question (e.g. “What was total revenue last year?”). Try a
-                follow-up like “and the year before?” to see it remember context.</li>
+            <li>Go to <b>Ask</b> → ask a question (e.g. “Summarize the key points of this document”).
+                Try a follow-up like “and any important dates or amounts?” to see it remember context.</li>
           </ol>
           <div class="why" style="margin-top:8px">
             ⏳ The <b>first</b> question is slow while the models load (one-time warm-up), then it's fast.
@@ -369,7 +369,7 @@
         </div>
         <div class="messages" id="messages">
           <div class="empty" id="askEmpty">Configure on <b>Settings</b>, upload a document, then ask here.
-            Try “What was total revenue last fiscal year?” then a follow-up “and the year before?”.</div>
+            Try “Summarize the key points of this document” then a follow-up “and any important dates or amounts?”.</div>
         </div>
         <div class="composer">
           <input id="q" placeholder="Ask a question about your documents…" autocomplete="off" />

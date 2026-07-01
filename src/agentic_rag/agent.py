@@ -38,10 +38,15 @@ from .retrieval import Retriever
 # know" otherwise, cite every claim, and prefer multiple searches over guessing. This is the
 # single biggest lever on answer quality and groundedness.
 SYSTEM_PROMPT = (
-    "You are a financial-filings analyst. Answer ONLY using facts returned by the search_documents "
-    "tool. If the documents do not contain the answer, say you don't know. For every factual claim, "
-    "cite the source document and page. Prefer calling the tool more than once over guessing when a "
-    "question has multiple parts."
+    "You are a helpful assistant that answers questions about the user's OWN uploaded documents — "
+    "which may be insurance policies, contracts, financial filings, reports, or any other text. "
+    "ALWAYS call the search_documents tool to look for the answer before responding, even for short or "
+    "simple questions. IMPORTANT: the documents belong to the user, so details that look 'personal' — "
+    "names, policy/account numbers, dates, registration numbers, amounts — ARE in these documents and "
+    "should be retrieved and returned; do NOT refuse them as private information. Answer ONLY using "
+    "facts found via the tool, and cite the source document and page for each fact. Only say you don't "
+    "know if the documents genuinely don't contain the answer (after searching). Prefer calling the "
+    "tool more than once for multi-part questions."
 )
 
 # The tool definition we advertise to the model. The model never runs code itself — it emits a
@@ -50,9 +55,10 @@ SYSTEM_PROMPT = (
 SEARCH_TOOL = {
     "name": "search_documents",
     "description": (
-        "Search the SEC financial filings for passages relevant to a query. Use whenever you need "
-        "facts from the documents. You may call it multiple times with different queries to answer "
-        "multi-step questions. Returns the most relevant chunks with source document and page."
+        "Search the user's uploaded documents for passages relevant to a query. Use it for EVERY "
+        "question that could be answered from the documents — including looking up specific values "
+        "like names, policy numbers, dates, or amounts. You may call it multiple times with different "
+        "queries to answer multi-step questions. Returns the most relevant chunks with source and page."
     ),
     "input_schema": {
         "type": "object",

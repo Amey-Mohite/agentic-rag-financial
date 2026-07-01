@@ -27,15 +27,16 @@ agent-building prompt ([AGENT_BUILD_PROMPT.md](AGENT_BUILD_PROMPT.md)).
 
 ## 1. Why this exists
 
-In finance, legal, and compliance, an answer is only useful if you can **trace it to its source**.
-This system retrieves the relevant passages from your documents, lets the model run **multi-step**
-retrieval for complex (multi-hop) questions, and returns every answer with the exact chunks —
-document, page, and relevance score — that support it.
+Across insurance, legal, finance, support, and internal knowledge, an answer is only useful if you
+can **trace it to its source**. This system works over **any documents** you upload — policies,
+contracts, reports, filings, manuals — retrieving the relevant passages, letting the model run
+**multi-step** retrieval for complex (multi-hop) questions, and returning every answer with the exact
+chunks — document, page, and relevance score — that support it.
 
 **Plain RAG vs Agentic RAG.** Plain RAG is a fixed pipeline: always retrieve once, then answer.
 **Agentic RAG** (this project) hands the retriever to the model **as a tool**, so the model decides
 *whether*, *what*, and *how many times* to search before answering — much better for multi-part
-questions like *"How did revenue change from FY24 to FY25, and why?"*
+questions like *"What does my policy cover, and what's excluded?"*
 
 ## 2. Features
 
