@@ -145,17 +145,31 @@ pip install -e ".[dev]" && pytest
 Hugging Face gives Docker Spaces **16 GB RAM** free — enough for the reranker — and a public link
 like `https://huggingface.co/spaces/<you>/agentic-rag`. Great for sharing on Upwork.
 
-### 3.1 Push the project to a Space
-1. Create a free account at huggingface.co → **New → Space** → **SDK: Docker**, **CPU basic (free)**, **Public**.
-2. The Space is a git repo; push this project into it (it already has a `Dockerfile`):
-   ```bash
-   git clone https://huggingface.co/spaces/<you>/agentic-rag hf-space
-   cp -r ./* hf-space/ && cd hf-space
-   git add . && git commit -m "deploy" && git push
-   ```
-   (Or use the Space's **Files → Upload** button.)
+### 3.1 Create the Space
+Create a free account at huggingface.co → **New → Space** → **SDK: Docker**, **CPU basic (free)**,
+**Public**. Note the id `‹username›/‹space-name›` (e.g. `Amey91/agentic-rag`). Get a **write** token at
+[huggingface.co/settings/tokens](https://huggingface.co/settings/tokens).
 
-### 3.2 The Space card metadata (required — this is what causes "config error")
+### 3.2 Upload the project (folders and all)
+**Option A — the uploader script (recommended; preserves folders, skips secrets):**
+```bash
+pip install huggingface_hub
+python scripts/deploy_hf.py --repo <username>/<space-name> --token hf_xxxxx
+# example:  python scripts/deploy_hf.py --repo Amey91/agentic-rag --token hf_xxxxx
+```
+Re-run the same command any time you change a file — the Space rebuilds automatically. The script
+excludes `.env` and local junk, so your keys never leave your machine.
+
+**Option B — git:**
+```bash
+git clone https://huggingface.co/spaces/<username>/<space-name> hf-space
+cp -r ./* hf-space/ && cd hf-space   # do NOT copy .env
+git add . && git commit -m "deploy" && git push
+```
+(When git asks for a password, paste your HF **write token**.) Or use the Space's **Files → Upload**
+button for a file or two.
+
+### 3.3 The Space card metadata (required — this is what causes "config error")
 A Docker Space is configured by a **YAML block at the top of `README.md`** (the "Space card"). This
 repo's README already includes it:
 ```
@@ -174,23 +188,23 @@ or malformed at the very top of the README in the Space — make sure it's there
 thing in the file. `app_port: 8000` routes HF to our container (which listens on 8000), so you do
 **not** need to set any `PORT` variable.
 
-### 3.2b (optionally) keys
+### 3.4 (optionally) pre-set keys
 - Easiest model: leave it at that and let each visitor enter **their own** keys on the Settings tab
   with the **In-memory** store. Nothing else to configure, and it won't spend your credits.
 - Or pre-configure it yourself by adding **Secrets** `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` and (for a
   persistent index) `QDRANT_URL`/`QDRANT_API_KEY` + Variable `RAG_CONFIG=config.k8s.yaml`.
 
-### 3.3 Build & open
+### 3.5 Build & open
 The Space builds the image (it pre-downloads the reranker — first build takes a few minutes). When
 the status is **Running**, open the URL → **Settings** (enter keys if not pre-set) → **Upload** →
 **Ask**.
 
-### 3.4 Make persistence stick
+### 3.6 Make persistence stick
 HF disk is **ephemeral** (cleared on restart/sleep). The **In-memory** store is cleared too. For a
 stable index that survives restarts, choose **Qdrant Cloud** or **Supabase/pgvector** on the Settings
 tab (both free, see §1.2).
 
-### 3.5 Notes for sharing the link
+### 3.7 Notes for sharing the link
 - Visitors use **their own** keys → your credits are safe.
 - Free Spaces **sleep when idle** and wake on visit — pre-warm it (ask one question) before demoing.
 - For a stable demo you control: pre-configure Qdrant Cloud/Supabase and pre-upload a couple of files.
