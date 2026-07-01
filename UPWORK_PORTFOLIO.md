@@ -1,5 +1,9 @@
 # Upwork Portfolio Showcase — Agentic RAG over Documents
 
+> **🔗 Live demo:** https://amey91-agentic-rag.hf.space/ — open it, paste your own OpenAI + Anthropic
+> keys on the Settings tab, leave "In-memory", upload a document, and ask. (First question is slow
+> while models warm up; if the Space is asleep it wakes on visit.)
+
 Ready-to-paste copy for an Upwork **Portfolio** entry, plus a proposal blurb. Edit the bracketed
 `[...]` bits and replace illustrative metrics with your own measured numbers from `scripts/run_eval.py`.
 
@@ -13,6 +17,7 @@ Ready-to-paste copy for an Upwork **Portfolio** entry, plus a proposal blurb. Ed
 ## 2. One-line tagline
 > An AI app that answers questions about your documents and **cites the exact source** (document,
 > page, score) — with a web UI where anyone can plug in their own keys and try it in a browser.
+> **Try the live demo:** https://amey91-agentic-rag.hf.space/
 
 ## 3. Overview (paste into the description)
 I built an end-to-end **Agentic RAG** system that answers natural-language questions over documents
@@ -95,7 +100,8 @@ token with streaming, and hybrid-vs-dense recall on your eval set.
 - **Screenshot 1:** the **Ask** tab showing an answer **with its citation chips** (the trust-builder).
 - **Screenshot 2:** the **Settings** tab (shows the depth — keys, vector store, all the knobs).
 - **Optional:** a 60–90s Loom asking a multi-part question and showing the streamed, cited answer.
-- Link the live demo (Hugging Face Space), the GitHub repo, and `agentic_rag_walkthrough.ipynb`.
+- **Live demo link:** https://amey91-agentic-rag.hf.space/ — add this as the portfolio project's URL,
+  and in your proposals. Also link the GitHub repo and `agentic_rag_walkthrough.ipynb`.
 
 ## 12. Short blurb (~60 words, for the portfolio card / proposals)
 > Built a production **Agentic RAG** app that answers questions about your documents and **cites its

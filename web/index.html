@@ -79,6 +79,18 @@
     .citations { align-self:flex-start; max-width:86%; font-size:12.5px; color:#334155; }
     .citations .c { display:inline-block; background:#eef2ff; border:1px solid #c7d2fe; color:#3730a3; padding:3px 9px; border-radius:999px; margin:3px 4px 0 0; }
     .meta { align-self:flex-start; font-size:11.5px; color:#94a3b8; }
+    /* Markdown rendering inside an answer bubble */
+    .msg.bot.md { white-space:normal; }
+    .msg.bot.md h1,.msg.bot.md h2,.msg.bot.md h3,.msg.bot.md h4 { font-size:14.5px; font-weight:700; margin:12px 0 4px; }
+    .msg.bot.md h1:first-child,.msg.bot.md h2:first-child,.msg.bot.md h3:first-child { margin-top:0; }
+    .msg.bot.md p { margin:6px 0; }
+    .msg.bot.md ul,.msg.bot.md ol { margin:6px 0; padding-left:20px; }
+    .msg.bot.md li { margin:3px 0; }
+    .msg.bot.md hr { border:0; border-top:1px solid #cbd5e1; margin:10px 0; }
+    .msg.bot.md code { background:#e2e8f0; padding:1px 5px; border-radius:5px; font-size:13px; }
+    .msg.bot.md strong { font-weight:700; }
+    .msg.bot.md table { border-collapse:collapse; margin:8px 0; font-size:13px; }
+    .msg.bot.md th,.msg.bot.md td { border:1px solid #cbd5e1; padding:4px 8px; text-align:left; }
     .composer { display:flex; gap:10px; padding:14px; border-top:1px solid var(--line); }
     .composer input { flex:1; padding:13px 14px; border:1px solid var(--line); border-radius:12px; font-size:15px; outline:none; }
     .empty { color:var(--muted); text-align:center; margin:auto; max-width:420px; }
@@ -394,6 +406,8 @@ ASK:     question (+ memory) → [ LLM → search tool → retrieve ]* → cited
     </section>
   </main>
 
+  <!-- marked.js renders the model's markdown answer into formatted HTML (headings, lists, tables). -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.0/marked.min.js"></script>
   <script>
     // =====================================================================================
     //  A per-browser session id identifies BOTH your pipeline and your conversation memory.
@@ -554,7 +568,15 @@ ASK:     question (+ memory) → [ LLM → search tool → retrieve ]* → cited
             const ev = JSON.parse(line.slice(6));
             if (ev.type === 'step') status.textContent = `🔎 searching: “${ev.query}”`;
             else if (ev.type === 'token') { if(!botEl){ status.remove(); botEl = addBubble('bot',''); } answer += ev.text; botEl.textContent = answer; messages.scrollTop = messages.scrollHeight; }
-            else if (ev.type === 'final') { if(!botEl){ status.remove(); botEl = addBubble('bot', ev.answer); } renderCitations(ev.citations); renderMeta(ev.steps, ev.usage); }
+            else if (ev.type === 'final') {
+              if(!botEl){ status.remove(); botEl = addBubble('bot', ''); }
+              const full = ev.answer || answer;
+              // Re-render the streamed plain text as formatted markdown (headings, lists, tables…).
+              if (window.marked) { botEl.className = 'msg bot md'; botEl.innerHTML = marked.parse(full); }
+              else { botEl.textContent = full; }   // fallback if the markdown lib didn't load
+              renderCitations(ev.citations); renderMeta(ev.steps, ev.usage);
+              messages.scrollTop = messages.scrollHeight;
+            }
           }
         }
       } catch(e) { status.textContent = '⚠️ Error: ' + e.message; }
