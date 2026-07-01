@@ -142,20 +142,24 @@ class AskResponse(BaseModel):
 def _build_config(s: RuntimeSettings) -> AppConfig:
     """Turn the UI's RuntimeSettings into a typed AppConfig (with keys + chosen vector store)."""
     dims = EMBED_DIMS.get(s.embedding_model, 3072)   # dimensionality is fixed by the model
+    # Namespace the collection/table by dimensionality so switching embedding models on a PERSISTENT
+    # store (Qdrant Cloud / Supabase) uses a fresh collection instead of colliding with one created
+    # at a different vector size (which caused "expected N dimensions, not M" errors).
+    collection = f"filings_{dims}"
     # Choose the vector store backend from the UI selection:
     if s.vector_store == "memory":
         # Embedded in-process Qdrant (url ":memory:") — zero setup, ephemeral.
-        vs = VectorStoreConfig(backend="qdrant", url=":memory:", api_key=None, collection="filings")
+        vs = VectorStoreConfig(backend="qdrant", url=":memory:", api_key=None, collection=collection)
     elif s.vector_store == "pgvector":
         # Supabase / any Postgres with the pgvector extension. dsn = the connection string.
         if not s.postgres_dsn:
             raise HTTPException(400, "Postgres/Supabase selected but no connection string provided")
-        vs = VectorStoreConfig(backend="pgvector", dsn=s.postgres_dsn, collection="filings")
+        vs = VectorStoreConfig(backend="pgvector", dsn=s.postgres_dsn, collection=collection)
     else:  # "qdrant"
         if not s.qdrant_url:
             raise HTTPException(400, "Qdrant selected but no qdrant_url provided")
         vs = VectorStoreConfig(backend="qdrant", url=s.qdrant_url,
-                               api_key=s.qdrant_api_key, collection="filings")
+                               api_key=s.qdrant_api_key, collection=collection)
     return AppConfig(
         embedding=EmbeddingConfig(model=s.embedding_model, dims=dims),
         generator=GeneratorConfig(model=s.generator_model, max_tokens=s.max_tokens,
